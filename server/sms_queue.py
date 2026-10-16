@@ -196,3 +196,32 @@ def get_queue_metrics(db_path: Optional[str] = None) -> Dict[str, Any]:
         "failed": row["count_failed"] or 0,
         "recent_activity": recent
     }
+
+def get_job_status(
+    job_id: int,
+    db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves the lifecycle and dispatch status of a specific SMS job.
+    Used for multi-step delivery verification by external clients.
+
+    Args:
+        job_id: Unique integer ID of the queued message.
+        db_path: Database path override.
+
+    Returns:
+        Dictionary with job details (id, phone, message, status, error_reason, timestamps) or None.
+    """
+    conn = database.get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, phone, message, status, sim_slot, retry_count, error_reason, created_at, updated_at
+        FROM sms_queue
+        WHERE id = ?;
+    """, (job_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+

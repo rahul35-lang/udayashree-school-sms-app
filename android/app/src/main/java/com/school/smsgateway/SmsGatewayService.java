@@ -44,7 +44,7 @@ public class SmsGatewayService extends Service {
     private static final int NOTIF_ID = 2001;
 
     private static final String DEFAULT_URL = "https://sms.success0.com.np";
-    private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
+    private static final String DEFAULT_TOKEN = "Udaya@momphone";
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -137,6 +137,12 @@ public class SmsGatewayService extends Service {
                     SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
                     String serverUrl = prefs.getString("server_url", DEFAULT_URL);
                     String token = prefs.getString("api_key", DEFAULT_TOKEN);
+                    if ("school_gateway_secret_2026".equals(token) ||
+                            "school_gateway_secret_2026_super_secure_token_np".equals(token)) {
+                        token = DEFAULT_TOKEN;
+                        prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
+                        Logger.i(TAG, "Migrated SmsGatewayService stored token to production key: " + DEFAULT_TOKEN);
+                    }
                     int intervalSec = prefs.getInt("interval_sec", 3);
 
                     int batteryLevel = getBatteryLevel();

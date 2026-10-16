@@ -45,7 +45,7 @@ SECONDARY_PORT = int(os.environ.get("GATEWAY_PORT_SECONDARY", 8000))
 # All handshake and polling requests MUST provide this token in headers or params.
 GATEWAY_SECRET_TOKEN = os.environ.get(
     "GATEWAY_SECRET_TOKEN",
-    "school_gateway_secret_2026_super_secure_token_np"
+    "Udaya@momphone"
 )
 
 # =============================================================================

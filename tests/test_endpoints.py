@@ -130,24 +130,31 @@ class TestServerEndpoints(unittest.TestCase):
     def test_full_otp_and_sms_lifecycle(self):
         """
         Complete end-to-end integration test:
-        1. Request OTP -> queued
+        1. Request OTP with token -> queued
         2. Attempt duplicate immediate OTP -> 429 Rate limit
         3. Poll job as phone gateway
         4. Report delivery as SENT
-        5. Verify submitted OTP -> success
-        6. Attempt replay verification -> 400 rejection
+        5. Verify SMS job status via /api/v1/sms/status
+        6. Verify submitted OTP -> success
+        7. Attempt replay verification -> 400 rejection
         """
         phone = "9841239999"
 
-        # 1. Request OTP
-        s_code, otp_res = self._post("/api/v1/otp/send", {"phone": phone})
+        # 1. Request OTP with token
+        s_code, otp_res = self._post("/api/v1/otp/send", {
+            "phone": phone,
+            "token": config.GATEWAY_SECRET_TOKEN
+        })
         self.assertEqual(s_code, 200)
         self.assertTrue(otp_res["success"])
         msg_id = otp_res["sms_job_id"]
 
         # 2. Rate limit rejection
         try:
-            self._post("/api/v1/otp/send", {"phone": phone})
+            self._post("/api/v1/otp/send", {
+                "phone": phone,
+                "token": config.GATEWAY_SECRET_TOKEN
+            })
             self.fail("Expected 429 Rate Limit")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 429)
@@ -172,23 +179,62 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(s_code, 200)
         self.assertTrue(rep_res["success"])
 
-        # 5. Verify submitted OTP
+        # 5. Verify SMS job status endpoint
+        s_code, status_res = self._get(f"/api/v1/sms/status?job_id={msg_id}&token={config.GATEWAY_SECRET_TOKEN}")
+        self.assertEqual(s_code, 200)
+        self.assertTrue(status_res["success"])
+        self.assertEqual(status_res["job"]["status"], "SENT")
+
+        # 6. Verify submitted OTP with token
         s_code, ver_res = self._post("/api/v1/otp/verify", {
             "phone": phone,
-            "otp": extracted_otp
+            "otp": extracted_otp,
+            "token": config.GATEWAY_SECRET_TOKEN
         })
         self.assertEqual(s_code, 200)
         self.assertTrue(ver_res["success"])
 
-        # 6. Replay attack rejection
+        # 7. Replay attack rejection
         try:
             self._post("/api/v1/otp/verify", {
                 "phone": phone,
-                "otp": extracted_otp
+                "otp": extracted_otp,
+                "token": config.GATEWAY_SECRET_TOKEN
             })
             self.fail("Expected 400 replay rejection")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
 
+    def test_unauthorized_endpoints_rejected(self):
+        """Verifies that calling OTP/SMS endpoints without valid token returns HTTP 401."""
+        # /api/v1/otp/send without token
+        try:
+            self._post("/api/v1/otp/send", {"phone": "9800000000"})
+            self.fail("Expected 401 for unauthorized otp send")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
+        # /api/v1/sms/send without token
+        try:
+            self._post("/api/v1/sms/send", {"phone": "9800000000", "message": "Test"})
+            self.fail("Expected 401 for unauthorized sms send")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
+        # /api/v1/otp/verify without token
+        try:
+            self._post("/api/v1/otp/verify", {"phone": "9800000000", "otp": "123456"})
+            self.fail("Expected 401 for unauthorized otp verify")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
+        # /api/v1/sms/status without token
+        try:
+            self._get("/api/v1/sms/status?job_id=1")
+            self.fail("Expected 401 for unauthorized sms status")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
 if __name__ == "__main__":
     unittest.main()
+

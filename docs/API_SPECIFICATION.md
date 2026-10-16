@@ -3,9 +3,9 @@
 Base URL: `https://sms.success0.com.np` (or `http://localhost:8080`)
 
 All gateway endpoints require the shared secret token via header:
-`X-Gateway-Token: school_gateway_secret_2026_super_secure_token_np`
+`X-Gateway-Token: Udaya@momphone`
 or query parameter:
-`?token=school_gateway_secret_2026_super_secure_token_np`
+`?token=Udaya@momphone`
 
 ---
 
@@ -17,7 +17,7 @@ Establishes mutual session and registers Android device hardware.
 - **Request Body:**
 ```json
 {
-  "token": "school_gateway_secret_2026_super_secure_token_np",
+  "token": "Udaya@momphone",
   "device_id": "vivo_v30_01",
   "device_model": "V2333",
   "battery_level": 75,

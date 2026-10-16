@@ -18,7 +18,7 @@ import urllib.request
 import urllib.error
 
 SERVER_URL = "http://127.0.0.1:8000"
-GATEWAY_KEY = "school_gateway_secret_2026"
+GATEWAY_KEY = "Udaya@momphone"
 TEST_PHONE = "9841000000"
 
 def get(path):

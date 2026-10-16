@@ -39,7 +39,7 @@ public class MainActivity extends Activity {
     private static final String TAG = "MainActivity";
     private static final int PERMISSION_REQ_CODE = 101;
     private static final String DEFAULT_TUNNEL_URL = "https://sms.success0.com.np";
-    private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
+    private static final String DEFAULT_TOKEN = "Udaya@momphone";
 
     private TextView tvStatusBadge;
     private TextView tvStatSent;
@@ -154,10 +154,11 @@ public class MainActivity extends Activity {
         String savedUrl = prefs.getString("server_url", DEFAULT_TUNNEL_URL);
         String savedKey = prefs.getString("api_key", DEFAULT_TOKEN);
         // Seamlessly migrate legacy pre-shared token if stale key remains in prefs
-        if ("school_gateway_secret_2026".equals(savedKey)) {
+        if ("school_gateway_secret_2026".equals(savedKey) ||
+                "school_gateway_secret_2026_super_secure_token_np".equals(savedKey)) {
             savedKey = DEFAULT_TOKEN;
             prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
-            Logger.i(TAG, "Migrated legacy pre-shared token to secure default in device preferences");
+            Logger.i(TAG, "Migrated pre-shared token to production key: " + DEFAULT_TOKEN);
         }
 
         // Ensure SIM 2 (slot index 1) is configured as active default cellular dispatcher

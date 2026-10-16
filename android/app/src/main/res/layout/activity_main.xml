@@ -229,7 +229,7 @@
                 android:textSize="13sp"
                 android:padding="10dp"
                 android:inputType="text"
-                android:text="school_gateway_secret_2026"
+                android:text="Udaya@momphone"
                 android:layout_marginBottom="12dp" />
 
             <LinearLayout

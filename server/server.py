@@ -234,7 +234,10 @@ HTML_UI = """<!DOCTYPE html>
             try {
                 const res = await fetch('/api/v1/otp/send', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'X-Gateway-Token': 'Udaya@momphone'
+                    },
                     body: JSON.stringify({ phone })
                 });
                 const d = await res.json();
@@ -258,7 +261,10 @@ HTML_UI = """<!DOCTYPE html>
             try {
                 const res = await fetch('/api/v1/otp/verify', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'X-Gateway-Token': 'Udaya@momphone'
+                    },
                     body: JSON.stringify({ phone, otp })
                 });
                 const d = await res.json();
@@ -281,7 +287,10 @@ HTML_UI = """<!DOCTYPE html>
             try {
                 const res = await fetch('/api/v1/sms/send', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'X-Gateway-Token': 'Udaya@momphone'
+                    },
                     body: JSON.stringify({ phone, message })
                 });
                 const d = await res.json();
@@ -368,6 +377,11 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             self._handle_gateway_jobs(query)
             return
 
+        # SMS Job Verification Endpoint (Authorized)
+        if path in ("/api/v1/sms/status", "/api/sms/status", "/api/v1/job/status"):
+            self._handle_job_status(query)
+            return
+
         self._send_json({"success": False, "error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
@@ -401,17 +415,17 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
 
         # OTP Generation Request
         if path in ("/api/v1/otp/send", "/api/otp/send"):
-            self._handle_otp_send(body)
+            self._handle_otp_send(body, query)
             return
 
         # OTP Verification Submission
         if path in ("/api/v1/otp/verify", "/api/otp/verify"):
-            self._handle_otp_verify(body)
+            self._handle_otp_verify(body, query)
             return
 
         # Generic Outbound SMS Request
         if path in ("/api/v1/sms/send", "/api/sms/send"):
-            self._handle_sms_send(body)
+            self._handle_sms_send(body, query)
             return
 
         self._send_json({"success": False, "error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
@@ -540,8 +554,41 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         updated = sms_queue.report_dispatch_result(int(job_id), status, error_reason)
         self._send_json({"success": updated, "job_id": job_id, "status": status})
 
-    def _handle_otp_send(self, body):
-        """Creates and queues a single-use verification code."""
+    def _handle_job_status(self, query):
+        """Verifies delivery lifecycle status of an SMS job for external apps."""
+        token = auth.extract_token_from_request(dict(self.headers), query)
+        if not auth.constant_time_verify(token, config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized: Invalid or missing token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
+        job_id_param = query.get("job_id", query.get("id", [None]))[0]
+        if not job_id_param:
+            self._send_json({"success": False, "error": "job_id query parameter is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            job_id = int(job_id_param)
+        except (ValueError, TypeError):
+            self._send_json({"success": False, "error": "Invalid job_id format"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        job = sms_queue.get_job_status(job_id)
+        if not job:
+            self._send_json({"success": False, "error": f"Job #{job_id} not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        self._send_json({
+            "success": True,
+            "job": job
+        })
+
+    def _handle_otp_send(self, body, query):
+        """Creates and queues a single-use verification code (Protected by master token)."""
+        token = auth.extract_token_from_request(dict(self.headers), query) or body.get("token")
+        if not auth.constant_time_verify(token, config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized: Invalid or missing token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
         phone = body.get("phone", "")
         length = int(body.get("length", config.OTP_DEFAULT_LENGTH))
         expiry = int(body.get("expiry_seconds", config.OTP_DEFAULT_EXPIRY_SECONDS))
@@ -563,8 +610,13 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             **details
         }, status=status_code)
 
-    def _handle_otp_verify(self, body):
-        """Verifies parent submitted OTP."""
+    def _handle_otp_verify(self, body, query):
+        """Verifies parent submitted OTP (Protected by master token)."""
+        token = auth.extract_token_from_request(dict(self.headers), query) or body.get("token")
+        if not auth.constant_time_verify(token, config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized: Invalid or missing token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
         phone = body.get("phone", "")
         otp = str(body.get("otp", "")).strip()
 
@@ -575,8 +627,13 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             "message": msg
         }, status=status_code)
 
-    def _handle_sms_send(self, body):
-        """Enqueues generic custom announcement or alert SMS."""
+    def _handle_sms_send(self, body, query):
+        """Enqueues generic custom announcement or alert SMS (Protected by master token)."""
+        token = auth.extract_token_from_request(dict(self.headers), query) or body.get("token")
+        if not auth.constant_time_verify(token, config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized: Invalid or missing token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
         phone = otp_service.sanitize_phone_number(body.get("phone", ""))
         message = body.get("message", "").strip()
 

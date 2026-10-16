@@ -35,11 +35,13 @@ echo "=== 4. Compiling Java Sources ==="
 javac -cp $PLATFORM/android.jar:$BUILD_DIR/gen \
     -d $BUILD_DIR/classes \
     -source 17 -target 17 \
+    -g:none \
     $BUILD_DIR/gen/com/school/smsgateway/R.java \
     $(find $APP_DIR/java -name "*.java")
 
-echo "=== 5. Dexing Classes with D8 ==="
+echo "=== 5. Dexing Classes with D8 (Release Optimization) ==="
 $BUILD_TOOLS/d8 \
+    --release \
     --lib $PLATFORM/android.jar \
     --output $BUILD_DIR/dex \
     --min-api 26 \

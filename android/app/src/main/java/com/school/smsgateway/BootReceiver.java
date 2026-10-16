@@ -39,7 +39,7 @@ public class BootReceiver extends BroadcastReceiver {
     public static final String ACTION_TEST = "com.school.smsgateway.TEST_HANDSHAKE";
 
     private static final String DEFAULT_URL = "https://sms.success0.com.np";
-    private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
+    private static final String DEFAULT_TOKEN = "Udaya@momphone";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -53,6 +53,14 @@ public class BootReceiver extends BroadcastReceiver {
         Logger.i(TAG, "BootReceiver received broadcast action: " + action);
 
         SharedPreferences prefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
+
+        // Migrate legacy token if found in shared preferences
+        String currentToken = prefs.getString("api_key", DEFAULT_TOKEN);
+        if ("school_gateway_secret_2026".equals(currentToken) ||
+                "school_gateway_secret_2026_super_secure_token_np".equals(currentToken)) {
+            prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
+            Logger.i(TAG, "Migrated BootReceiver stored token to production key: " + DEFAULT_TOKEN);
+        }
 
         // --------------------------------------------------------------------
         // BRANCH 1: STOP SERVICE REQUEST
@@ -74,6 +82,11 @@ public class BootReceiver extends BroadcastReceiver {
             new Thread(() -> {
                 String serverUrl = prefs.getString("server_url", DEFAULT_URL);
                 String token = prefs.getString("api_key", DEFAULT_TOKEN);
+                if ("school_gateway_secret_2026".equals(token) ||
+                        "school_gateway_secret_2026_super_secure_token_np".equals(token)) {
+                    token = DEFAULT_TOKEN;
+                    prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
+                }
                 String deviceId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
                 if (deviceId == null || deviceId.isEmpty()) {
                     deviceId = "android_" + Build.MODEL;

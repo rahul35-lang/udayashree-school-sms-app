@@ -50,7 +50,7 @@ Restart=always
 RestartSec=5
 Environment=GATEWAY_PORT=8080
 Environment=GATEWAY_PORT_SECONDARY=8000
-Environment=GATEWAY_SECRET_TOKEN=school_gateway_secret_2026_super_secure_token_np
+Environment=GATEWAY_SECRET_TOKEN=Udaya@momphone
 
 [Install]
 WantedBy=multi-user.target
