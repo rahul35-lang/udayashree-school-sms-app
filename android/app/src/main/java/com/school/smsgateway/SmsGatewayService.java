@@ -91,8 +91,10 @@ public class SmsGatewayService extends Service {
         createNotificationChannel();
 
         IntentFilter filter = new IntentFilter(SmsSender.ACTION_SMS_SENT);
+        // Telephony system daemon (com.android.phone) fires the PendingIntent callback,
+        // so this receiver MUST be registered with RECEIVER_EXPORTED on API 33+.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(smsSentReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(smsSentReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(smsSentReceiver, filter);
         }

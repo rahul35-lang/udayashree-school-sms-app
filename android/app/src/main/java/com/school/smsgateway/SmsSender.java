@@ -44,10 +44,13 @@ public class SmsSender {
         }
 
         Intent sentIntent = new Intent(ACTION_SMS_SENT);
+        sentIntent.setPackage(context.getPackageName());
         sentIntent.putExtra(EXTRA_JOB_ID, jobId);
 
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags |= PendingIntent.FLAG_MUTABLE;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             flags |= PendingIntent.FLAG_IMMUTABLE;
         }
 

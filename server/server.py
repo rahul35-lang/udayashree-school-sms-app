@@ -481,10 +481,13 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         conn = database.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE gateway_devices
-            SET last_heartbeat_at = ?, battery_level = COALESCE(?, battery_level), is_charging = ?
-            WHERE device_id = ?;
-        """, (now, battery, is_charging, device_id))
+            INSERT INTO gateway_devices (device_id, device_model, battery_level, is_charging, last_handshake_at, last_heartbeat_at)
+            VALUES (?, 'Android Gateway', ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                last_heartbeat_at = excluded.last_heartbeat_at,
+                battery_level = COALESCE(excluded.battery_level, gateway_devices.battery_level),
+                is_charging = excluded.is_charging;
+        """, (device_id, battery, is_charging, now, now))
         conn.commit()
         conn.close()
 
@@ -504,10 +507,12 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         conn = database.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE gateway_devices
-            SET last_heartbeat_at = ?, battery_level = COALESCE(?, battery_level)
-            WHERE device_id = ?;
-        """, (now, int(battery) if battery else None, device_id))
+            INSERT INTO gateway_devices (device_id, device_model, battery_level, last_handshake_at, last_heartbeat_at)
+            VALUES (?, 'Android Gateway', ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                last_heartbeat_at = excluded.last_heartbeat_at,
+                battery_level = COALESCE(excluded.battery_level, gateway_devices.battery_level);
+        """, (device_id, int(battery) if battery else None, now, now))
         conn.commit()
         conn.close()
 

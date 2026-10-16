@@ -148,11 +148,23 @@ def create_and_queue_otp(
     conn = database.get_connection(db_path)
     cursor = conn.cursor()
 
-    # Insert into otp_verifications table
-    cursor.execute("""
-        INSERT INTO otp_verifications (phone, otp_code, expires_at, is_verified, created_at)
-        VALUES (?, ?, ?, 0, ?);
-    """, (phone, otp_code, expires_at, now))
+    # Insert into otp_verifications table with dynamic schema compatibility
+    cols = [col[1] for col in cursor.execute("PRAGMA table_info(otp_verifications);").fetchall()]
+    if "otp" in cols and "otp_code" in cols:
+        cursor.execute("""
+            INSERT INTO otp_verifications (phone, otp, otp_code, expires_at, is_verified, created_at)
+            VALUES (?, ?, ?, ?, 0, ?);
+        """, (phone, otp_code, otp_code, expires_at, now))
+    elif "otp" in cols:
+        cursor.execute("""
+            INSERT INTO otp_verifications (phone, otp, expires_at, is_verified, created_at)
+            VALUES (?, ?, ?, 0, ?);
+        """, (phone, otp_code, expires_at, now))
+    else:
+        cursor.execute("""
+            INSERT INTO otp_verifications (phone, otp_code, expires_at, is_verified, created_at)
+            VALUES (?, ?, ?, 0, ?);
+        """, (phone, otp_code, expires_at, now))
     otp_id = cursor.lastrowid
 
     # Queue SMS into sms_queue table
@@ -200,9 +212,11 @@ def verify_submitted_otp(
     conn = database.get_connection(db_path)
     cursor = conn.cursor()
 
-    # Retrieve most recent unverified OTP for this phone
-    cursor.execute("""
-        SELECT id, otp_code, expires_at, is_verified
+    # Retrieve most recent unverified OTP for this phone with dynamic column support
+    cols = [col[1] for col in cursor.execute("PRAGMA table_info(otp_verifications);").fetchall()]
+    otp_expr = "COALESCE(otp_code, otp)" if ("otp" in cols and "otp_code" in cols) else ("otp" if "otp" in cols else "otp_code")
+    cursor.execute(f"""
+        SELECT id, {otp_expr} AS otp_code, expires_at, is_verified
         FROM otp_verifications
         WHERE phone = ? AND is_verified = 0
         ORDER BY id DESC LIMIT 1;

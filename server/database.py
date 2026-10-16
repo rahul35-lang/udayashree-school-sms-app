@@ -46,11 +46,13 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
         Configured sqlite3.Connection object ready for queries.
     """
     path = db_path if db_path is not None else config.DB_PATH
-    conn = sqlite3.connect(path, timeout=15.0, check_same_thread=False)
+    conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
+    conn.isolation_level = None  # Autocommit mode prevents implicit deferred read locks
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    # WAL (Write-Ahead Logging) mode allows simultaneous readers while a write occurs
     conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 def init_db(db_path: Optional[str] = None) -> None:
