@@ -1,86 +1,49 @@
 #!/usr/bin/env python3
 """
-School SMS & OTP Gateway Server
-Zero-dependency, standalone server with SQLite persistence.
-Handles OTP generation, verification, and queues SMS jobs for the Android Gateway.
+===============================================================================
+FILE: server.py
+MODULE: SchoolSMSGateway.server.server
+DESCRIPTION:
+    High-Performance, Zero-Dependency Multithreaded REST Gateway Server.
+    Integrates Cloudflare Tunnel ingress, token-based mutual handshakes,
+    OTP verification workflows, and persistent cellular SMS dispatch queuing.
+
+ENDPOINTS SPECIFICATION:
+    1. GATEWAY API (Shared Token Protected):
+       - POST /api/v1/gateway/handshake -> Hardware registration & session key
+       - GET  /api/v1/gateway/jobs      -> Atomic FIFO SMS queue fetch
+       - POST /api/v1/gateway/report    -> Acknowledge SENT or FAILED delivery
+       - POST /api/v1/gateway/heartbeat -> Ultra-low bandwidth liveness ping
+
+    2. SCHOOL APP API:
+       - POST /api/v1/otp/send          -> Request 6-digit verification code
+       - POST /api/v1/otp/verify        -> Validate parent submitted code
+       - POST /api/v1/sms/send          -> Outbound announcement SMS
+
+    3. MONITORING & DASHBOARD:
+       - GET  /api/v1/status            -> Live system and cellular metrics
+       - GET  /                         -> Modern browser management dashboard
+
+AUTHOR: School System Development Team
+LAST MODIFIED: 2026-10-16
+===============================================================================
 """
 
 import json
 import os
-import random
-import re
-import sqlite3
-import string
 import sys
+import threading
 import time
 from http import HTTPStatus
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-# Configuration Defaults
-PORT = int(os.environ.get("PORT", 8000))
-HOST = os.environ.get("HOST", "0.0.0.0")
-GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "school_gateway_secret_2026")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sms_gateway.db")
+try:
+    from . import auth, config, database, otp_service, sms_queue
+except ImportError:
+    import auth, config, database, otp_service, sms_queue
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # SMS Queue Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sms_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL,
-            message TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PENDING',
-            error TEXT,
-            sim_slot INTEGER DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        )
-    """)
-    
-    # OTP Verifications Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS otp_verifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL,
-            otp TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            is_verified INTEGER DEFAULT 0,
-            verified_at INTEGER,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    
-    # Gateway Heartbeat Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS gateway_heartbeat (
-            id INTEGER PRIMARY KEY,
-            device_info TEXT,
-            battery_level INTEGER,
-            is_charging INTEGER,
-            last_seen INTEGER NOT NULL
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def sanitize_phone(phone: str) -> str:
-    cleaned = re.sub(r'[\s\-\(\)]', '', phone.strip())
-    return cleaned
-
-def generate_otp(length: int = 6) -> str:
-    return "".join(random.choices(string.digits, k=length))
-
-HTML_DASHBOARD = """<!DOCTYPE html>
+HTML_UI = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -102,18 +65,18 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         body { background: var(--bg); color: var(--text-main); padding: 24px; min-height: 100vh; }
         .container { max-width: 1100px; margin: 0 auto; }
-        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-        h1 { font-size: 24px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; }
-        .badge { padding: 6px 12px; border-radius: 9999px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+        h1 { font-size: 22px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; }
+        .badge { padding: 6px 14px; border-radius: 9999px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
         .badge.online { background: rgba(16, 185, 129, 0.2); color: var(--success); border: 1px solid var(--success); }
         .badge.offline { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
         .grid-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
         .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; }
-        .stat-label { font-size: 13px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 8px; }
-        .stat-value { font-size: 32px; font-weight: 700; color: #fff; }
+        .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 8px; }
+        .stat-value { font-size: 30px; font-weight: 700; color: #fff; }
         .grid-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
         @media (max-width: 768px) { .grid-actions { grid-template-columns: 1fr; } }
-        h2 { font-size: 18px; margin-bottom: 16px; color: #cbd5e1; }
+        h2 { font-size: 17px; margin-bottom: 16px; color: #cbd5e1; }
         .form-group { margin-bottom: 14px; }
         label { display: block; font-size: 13px; margin-bottom: 6px; color: var(--text-muted); }
         input, textarea { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--card-border); background: #0f172a; color: #fff; font-size: 14px; }
@@ -138,26 +101,26 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         <header>
             <div>
                 <h1>📱 School SMS & OTP Gateway</h1>
-                <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">Self-Hosted 24/7 Cellular SMS Gateway</p>
+                <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">Cloudflare Tunnel: <code>https://sms.success0.com.np</code></p>
             </div>
             <div id="gatewayStatus" class="badge offline">Phone Gateway Offline</div>
         </header>
 
         <div class="grid-stats">
             <div class="card">
-                <div class="stat-label">Total OTPs Sent</div>
-                <div class="stat-value" id="statOtps">-</div>
+                <div class="stat-label">Total Outbound SMS</div>
+                <div class="stat-value" id="statTotal">-</div>
             </div>
             <div class="card">
                 <div class="stat-label">Pending In Queue</div>
                 <div class="stat-value" id="statPending" style="color: #38bdf8;">-</div>
             </div>
             <div class="card">
-                <div class="stat-label">Successfully Sent</div>
+                <div class="stat-label">Successfully Dispatched</div>
                 <div class="stat-value" id="statSent" style="color: var(--success);">-</div>
             </div>
             <div class="card">
-                <div class="stat-label">Failed SMS</div>
+                <div class="stat-label">Cellular Failures</div>
                 <div class="stat-value" id="statFailed" style="color: var(--danger);">-</div>
             </div>
         </div>
@@ -200,7 +163,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         </div>
 
         <div class="card">
-            <h2>📜 Recent SMS Queue & Activity Log</h2>
+            <h2>📜 Real-time SMS Queue & Activity Log</h2>
             <div style="overflow-x: auto; margin-top: 12px;">
                 <table>
                     <thead>
@@ -223,24 +186,24 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     <script>
         async function fetchStatus() {
             try {
-                const res = await fetch('/api/status');
+                const res = await fetch('/api/v1/status');
                 const data = await res.json();
                 
                 const badge = document.getElementById('gatewayStatus');
                 if (data.gateway_online) {
                     badge.className = 'badge online';
-                    badge.innerText = `● Phone Online (Battery ${data.battery ?? '?' }%)`;
+                    badge.innerText = `● Phone Online (${data.device_model || 'Device'} - ${data.battery ?? '?' }%)`;
                 } else {
                     badge.className = 'badge offline';
                     badge.innerText = data.last_seen_seconds != null ? `● Phone Offline (Last seen ${data.last_seen_seconds}s ago)` : '● Phone Not Connected';
                 }
 
-                document.getElementById('statOtps').innerText = data.total_otps;
-                document.getElementById('statPending').innerText = data.pending;
-                document.getElementById('statSent').innerText = data.sent;
-                document.getElementById('statFailed').innerText = data.failed;
+                document.getElementById('statTotal').innerText = data.metrics.total_messages;
+                document.getElementById('statPending').innerText = data.metrics.pending;
+                document.getElementById('statSent').innerText = data.metrics.sent;
+                document.getElementById('statFailed').innerText = data.metrics.failed;
 
-                renderLogs(data.recent_logs);
+                renderLogs(data.metrics.recent_activity);
             } catch (err) {
                 console.error("Status fetch error:", err);
             }
@@ -269,17 +232,17 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             if (!phone) return showMsg(alertBox, 'Please enter a phone number', false);
             
             try {
-                const res = await fetch('/api/otp/send', {
+                const res = await fetch('/api/v1/otp/send', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phone })
                 });
                 const d = await res.json();
                 if (d.success) {
-                    showMsg(alertBox, `✓ OTP sent to ${phone}! Expires in 5 minutes.`, true);
+                    showMsg(alertBox, `✓ OTP queued for ${phone}! Cellular dispatch in progress.`, true);
                     fetchStatus();
                 } else {
-                    showMsg(alertBox, `✗ ${d.error}`, false);
+                    showMsg(alertBox, `✗ ${d.message || d.error}`, false);
                 }
             } catch (err) {
                 showMsg(alertBox, `Network error: ${err.message}`, false);
@@ -293,7 +256,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             if (!phone || !otp) return showMsg(alertBox, 'Enter phone and OTP code', false);
             
             try {
-                const res = await fetch('/api/otp/verify', {
+                const res = await fetch('/api/v1/otp/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phone, otp })
@@ -302,7 +265,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                 if (d.success) {
                     showMsg(alertBox, `✓ Verified! Phone number authenticated.`, true);
                 } else {
-                    showMsg(alertBox, `✗ ${d.error}`, false);
+                    showMsg(alertBox, `✗ ${d.message || d.error}`, false);
                 }
             } catch (err) {
                 showMsg(alertBox, `Network error: ${err.message}`, false);
@@ -316,18 +279,18 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             if (!phone || !message) return showMsg(alertBox, 'Enter recipient and message', false);
 
             try {
-                const res = await fetch('/api/sms/send', {
+                const res = await fetch('/api/v1/sms/send', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phone, message })
                 });
                 const d = await res.json();
                 if (d.success) {
-                    showMsg(alertBox, `✓ SMS Queued (ID #${d.message_id})!`, true);
+                    showMsg(alertBox, `✓ SMS Queued (Job #${d.job_id})!`, true);
                     document.getElementById('smsText').value = '';
                     fetchStatus();
                 } else {
-                    showMsg(alertBox, `✗ ${d.error}`, false);
+                    showMsg(alertBox, `✗ ${d.message || d.error}`, false);
                 }
             } catch (err) {
                 showMsg(alertBox, `Network error: ${err.message}`, false);
@@ -346,20 +309,26 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 </html>
 """
 
-class SMSGatewayHandler(BaseHTTPRequestHandler):
+class ModularGatewayHandler(BaseHTTPRequestHandler):
+    """
+    HTTP Request Handler routing all API endpoints and static assets.
+    """
+
     def _send_json(self, data, status=HTTPStatus.OK):
+        """Helper to serialize dictionary to JSON and send with full CORS headers."""
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Gateway-Key")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Gateway-Token")
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_html(self, html_content, status=HTTPStatus.OK):
-        payload = html_content.encode("utf-8")
+    def _send_html(self, html_text, status=HTTPStatus.OK):
+        """Helper to send HTML documents."""
+        payload = html_text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
@@ -367,345 +336,274 @@ class SMSGatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_OPTIONS(self):
+        """Handles browser pre-flight CORS negotiation."""
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Gateway-Key")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Gateway-Token")
         self.end_headers()
 
     def do_GET(self):
+        """Dispatches HTTP GET requests."""
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        if path == "/" or path == "/dashboard":
-            self._send_html(HTML_DASHBOARD)
+        # Dashboard Web UI
+        if path in ("/", "/dashboard", "/index.html"):
+            self._send_html(HTML_UI)
             return
 
-        if path == "/api/status":
+        # System Metrics & Health Endpoint
+        if path in ("/api/v1/status", "/api/status"):
             self._handle_status()
             return
 
-        if path == "/api/gateway/poll":
-            self._handle_gateway_poll(query)
+        # Gateway Job Polling Endpoint (Authorized)
+        if path in ("/api/v1/gateway/jobs", "/api/gateway/poll"):
+            self._handle_gateway_jobs(query)
             return
 
-        self._send_json({"error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
+        self._send_json({"success": False, "error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
+        """Dispatches HTTP POST requests."""
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
         content_length = int(self.headers.get("Content-Length", 0))
         body_bytes = self.rfile.read(content_length) if content_length > 0 else b"{}"
-        
+
         try:
             body = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
         except json.JSONDecodeError:
-            self._send_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
+            self._send_json({"success": False, "error": "Malformed JSON payload"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        if path == "/api/otp/send":
+        # Gateway Handshake
+        if path in ("/api/v1/gateway/handshake", "/api/gateway/handshake"):
+            self._handle_gateway_handshake(body)
+            return
+
+        # Gateway Heartbeat
+        if path in ("/api/v1/gateway/heartbeat", "/api/gateway/heartbeat"):
+            self._handle_gateway_heartbeat(body, query)
+            return
+
+        # Gateway Status Reporting (SENT / FAILED)
+        if path in ("/api/v1/gateway/report", "/api/gateway/report"):
+            self._handle_gateway_report(body, query)
+            return
+
+        # OTP Generation Request
+        if path in ("/api/v1/otp/send", "/api/otp/send"):
             self._handle_otp_send(body)
             return
 
-        if path == "/api/otp/verify":
+        # OTP Verification Submission
+        if path in ("/api/v1/otp/verify", "/api/otp/verify"):
             self._handle_otp_verify(body)
             return
 
-        if path == "/api/sms/send":
+        # Generic Outbound SMS Request
+        if path in ("/api/v1/sms/send", "/api/sms/send"):
             self._handle_sms_send(body)
             return
 
-        if path == "/api/gateway/report":
-            self._handle_gateway_report(body)
-            return
+        self._send_json({"success": False, "error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
 
-        self._send_json({"error": "Endpoint not found"}, status=HTTPStatus.NOT_FOUND)
+    # =========================================================================
+    # HANDLER IMPLEMENTATIONS
+    # =========================================================================
 
     def _handle_status(self):
-        conn = get_db()
+        """Gathers and serializes overall system metrics and device liveness."""
+        metrics = sms_queue.get_queue_metrics()
+        conn = database.get_connection()
         cursor = conn.cursor()
         now = int(time.time())
 
-        # Gateway Phone Status
-        cursor.execute("SELECT battery_level, is_charging, last_seen FROM gateway_heartbeat WHERE id = 1")
-        hb = cursor.fetchone()
-        gateway_online = False
-        last_seen_sec = None
-        battery = None
-        if hb:
-            last_seen_sec = now - hb["last_seen"]
-            # Active if polled in last 30 seconds
-            gateway_online = last_seen_sec <= 30
-            battery = hb["battery_level"]
-
-        # Counts
-        cursor.execute("SELECT COUNT(*) FROM otp_verifications")
-        total_otps = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM sms_queue WHERE status = 'PENDING' OR status = 'DISPATCHING'")
-        pending = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM sms_queue WHERE status = 'SENT'")
-        sent = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM sms_queue WHERE status = 'FAILED'")
-        failed = cursor.fetchone()[0]
-
-        # Recent 15 logs
+        # Check most active gateway device
         cursor.execute("""
-            SELECT id, phone, message, status, created_at 
-            FROM sms_queue 
-            ORDER BY id DESC LIMIT 15
+            SELECT device_id, device_model, battery_level, is_charging, last_heartbeat_at
+            FROM gateway_devices
+            ORDER BY last_heartbeat_at DESC LIMIT 1;
         """)
-        rows = cursor.fetchall()
-        recent = [dict(r) for r in rows]
-
+        dev = cursor.fetchone()
         conn.close()
 
+        gateway_online = False
+        last_seen = None
+        battery = None
+        model = None
+
+        if dev:
+            last_seen = now - dev["last_heartbeat_at"]
+            gateway_online = (last_seen <= config.HEARTBEAT_TIMEOUT_SECONDS)
+            battery = dev["battery_level"]
+            model = dev["device_model"]
+
         self._send_json({
+            "status": "ONLINE",
+            "server_time": now,
             "gateway_online": gateway_online,
-            "last_seen_seconds": last_seen_sec,
+            "device_model": model,
+            "last_seen_seconds": last_seen,
             "battery": battery,
-            "total_otps": total_otps,
-            "pending": pending,
-            "sent": sent,
-            "failed": failed,
-            "recent_logs": recent
+            "metrics": metrics
         })
+
+    def _handle_gateway_handshake(self, body):
+        """Processes mutual handshake with Android device."""
+        success, message, payload = auth.process_handshake(body)
+        status_code = HTTPStatus.OK if success else HTTPStatus.UNAUTHORIZED
+        self._send_json({
+            "success": success,
+            "message": message,
+            "data": payload
+        }, status=status_code)
+
+    def _handle_gateway_heartbeat(self, body, query):
+        """Handles lightweight keepalive ping from phone."""
+        if not auth.verify_request_auth(dict(self.headers), query) and not auth.constant_time_verify(body.get("token"), config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
+        device_id = str(body.get("device_id", "default")).strip()
+        battery = body.get("battery_level")
+        is_charging = 1 if body.get("is_charging") else 0
+        now = int(time.time())
+
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE gateway_devices
+            SET last_heartbeat_at = ?, battery_level = COALESCE(?, battery_level), is_charging = ?
+            WHERE device_id = ?;
+        """, (now, battery, is_charging, device_id))
+        conn.commit()
+        conn.close()
+
+        self._send_json({"success": True, "ack": "HEARTBEAT_ACK", "timestamp": now})
+
+    def _handle_gateway_jobs(self, query):
+        """Atomically returns pending SMS jobs to authenticated phone."""
+        if not auth.verify_request_auth(dict(self.headers), query):
+            self._send_json({"success": False, "error": "Unauthorized token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
+        # Update keepalive on poll
+        device_id = query.get("device_id", ["default"])[0]
+        battery = query.get("battery", [None])[0]
+        now = int(time.time())
+
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE gateway_devices
+            SET last_heartbeat_at = ?, battery_level = COALESCE(?, battery_level)
+            WHERE device_id = ?;
+        """, (now, int(battery) if battery else None, device_id))
+        conn.commit()
+        conn.close()
+
+        jobs = sms_queue.fetch_and_claim_pending_jobs(limit=config.BATCH_POLL_LIMIT)
+        self._send_json({
+            "success": True,
+            "jobs_count": len(jobs),
+            "jobs": jobs
+        })
+
+    def _handle_gateway_report(self, body, query):
+        """Receives delivery confirmation from cellular dispatcher."""
+        if not auth.verify_request_auth(dict(self.headers), query) and not auth.constant_time_verify(body.get("token"), config.GATEWAY_SECRET_TOKEN):
+            self._send_json({"success": False, "error": "Unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
+        job_id = body.get("job_id") or body.get("id")
+        status = body.get("status", "SENT")
+        error_reason = body.get("error") or body.get("error_reason")
+
+        if not job_id:
+            self._send_json({"success": False, "error": "job_id is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        updated = sms_queue.report_dispatch_result(int(job_id), status, error_reason)
+        self._send_json({"success": updated, "job_id": job_id, "status": status})
 
     def _handle_otp_send(self, body):
-        phone_raw = body.get("phone", "")
-        phone = sanitize_phone(phone_raw)
-        if not phone or len(phone) < 8:
-            self._send_json({"success": False, "error": "Invalid phone number"}, status=HTTPStatus.BAD_REQUEST)
-            return
+        """Creates and queues a single-use verification code."""
+        phone = body.get("phone", "")
+        length = int(body.get("length", config.OTP_DEFAULT_LENGTH))
+        expiry = int(body.get("expiry_seconds", config.OTP_DEFAULT_EXPIRY_SECONDS))
+        template = body.get("template")
 
-        length = int(body.get("length", 6))
-        expiry_seconds = int(body.get("expiry_seconds", 300))  # 5 min default
-        template = body.get("template", "Your School App verification code is: {otp}. Valid for 5 mins.")
-        
-        now = int(time.time())
-        conn = get_db()
-        cursor = conn.cursor()
+        success, msg, details = otp_service.create_and_queue_otp(
+            phone_raw=phone,
+            length=length,
+            expiry_seconds=expiry,
+            custom_template=template
+        )
 
-        # Rate Limiting: 1 OTP per 60 seconds per phone
-        cursor.execute("""
-            SELECT created_at FROM otp_verifications 
-            WHERE phone = ? AND is_verified = 0 AND ? - created_at < 60
-            ORDER BY id DESC LIMIT 1
-        """, (phone, now))
-        recent = cursor.fetchone()
-        if recent:
-            wait_time = 60 - (now - recent["created_at"])
-            conn.close()
-            self._send_json({
-                "success": False, 
-                "error": f"Please wait {wait_time}s before requesting another OTP."
-            }, status=HTTPStatus.TOO_MANY_REQUESTS)
-            return
-
-        otp = generate_otp(length)
-        expires_at = now + expiry_seconds
-        message_text = template.replace("{otp}", otp)
-
-        # Record OTP
-        cursor.execute("""
-            INSERT INTO otp_verifications (phone, otp, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (phone, otp, expires_at, now))
-
-        # Queue SMS for Android Gateway Phone
-        cursor.execute("""
-            INSERT INTO sms_queue (phone, message, status, created_at, updated_at)
-            VALUES (?, ?, 'PENDING', ?, ?)
-        """, (phone, message_text, now, now))
-        msg_id = cursor.lastrowid
-
-        conn.commit()
-        conn.close()
-
+        status_code = HTTPStatus.OK if success else (HTTPStatus.TOO_MANY_REQUESTS if "Rate limit" in msg else HTTPStatus.BAD_REQUEST)
         self._send_json({
-            "success": True,
-            "message_id": msg_id,
-            "phone": phone,
-            "expires_in": expiry_seconds
-        })
+            "success": success,
+            "message": msg,
+            **details
+        }, status=status_code)
 
     def _handle_otp_verify(self, body):
-        phone_raw = body.get("phone", "")
+        """Verifies parent submitted OTP."""
+        phone = body.get("phone", "")
         otp = str(body.get("otp", "")).strip()
-        phone = sanitize_phone(phone_raw)
 
-        if not phone or not otp:
-            self._send_json({"success": False, "error": "Phone and OTP are required"}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        now = int(time.time())
-        conn = get_db()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT id, otp, expires_at FROM otp_verifications
-            WHERE phone = ? AND is_verified = 0
-            ORDER BY id DESC LIMIT 1
-        """, (phone,))
-        record = cursor.fetchone()
-
-        if not record:
-            conn.close()
-            self._send_json({"success": False, "error": "No OTP requested for this number."}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        if now > record["expires_at"]:
-            conn.close()
-            self._send_json({"success": False, "error": "OTP has expired. Please request a new one."}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        if record["otp"] != otp:
-            conn.close()
-            self._send_json({"success": False, "error": "Incorrect OTP code. Please try again."}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        # Mark as verified (prevent replay attacks)
-        cursor.execute("""
-            UPDATE otp_verifications 
-            SET is_verified = 1, verified_at = ?
-            WHERE id = ?
-        """, (now, record["id"]))
-        conn.commit()
-        conn.close()
-
+        success, msg = otp_service.verify_submitted_otp(phone, otp)
+        status_code = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
         self._send_json({
-            "success": True,
-            "message": "Phone number verified successfully!"
-        })
+            "success": success,
+            "message": msg
+        }, status=status_code)
 
     def _handle_sms_send(self, body):
-        phone_raw = body.get("phone", "")
+        """Enqueues generic custom announcement or alert SMS."""
+        phone = otp_service.sanitize_phone_number(body.get("phone", ""))
         message = body.get("message", "").strip()
-        phone = sanitize_phone(phone_raw)
 
         if not phone or not message:
-            self._send_json({"success": False, "error": "Phone and message are required"}, status=HTTPStatus.BAD_REQUEST)
+            self._send_json({"success": False, "error": "Both phone and message are required"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        now = int(time.time())
-        conn = get_db()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            INSERT INTO sms_queue (phone, message, status, created_at, updated_at)
-            VALUES (?, ?, 'PENDING', ?, ?)
-        """, (phone, message, now, now))
-        msg_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-
+        job_id = sms_queue.enqueue_sms(phone, message)
         self._send_json({
             "success": True,
-            "message_id": msg_id
+            "job_id": job_id,
+            "phone": phone,
+            "status": "PENDING"
         })
 
-    def _check_gateway_auth(self, query):
-        auth_header = self.headers.get("X-Gateway-Key", "")
-        query_key = query.get("key", [""])[0]
-        return auth_header == GATEWAY_API_KEY or query_key == GATEWAY_API_KEY
-
-    def _handle_gateway_poll(self, query):
-        if not self._check_gateway_auth(query):
-            self._send_json({"error": "Unauthorized gateway key"}, status=HTTPStatus.UNAUTHORIZED)
-            return
-
-        now = int(time.time())
-        battery = query.get("battery", [None])[0]
-        charging = query.get("charging", [None])[0]
-        device = query.get("device", ["Android Phone"])[0]
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Update heartbeat
-        cursor.execute("""
-            INSERT INTO gateway_heartbeat (id, device_info, battery_level, is_charging, last_seen)
-            VALUES (1, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                device_info = excluded.device_info,
-                battery_level = excluded.battery_level,
-                is_charging = excluded.is_charging,
-                last_seen = excluded.last_seen
-        """, (device, int(battery) if battery else None, 1 if charging == "1" else 0, now))
-
-        # Fetch up to 5 PENDING jobs
-        cursor.execute("""
-            SELECT id, phone, message 
-            FROM sms_queue 
-            WHERE status = 'PENDING'
-            ORDER BY id ASC LIMIT 5
-        """)
-        rows = cursor.fetchall()
-        jobs = []
-
-        if rows:
-            ids = [r["id"] for r in rows]
-            cursor.execute(f"""
-                UPDATE sms_queue 
-                SET status = 'DISPATCHING', updated_at = ?
-                WHERE id IN ({','.join(['?']*len(ids))})
-            """, [now] + ids)
-            jobs = [{"id": r["id"], "phone": r["phone"], "message": r["message"]} for r in rows]
-
-        conn.commit()
-        conn.close()
-
-        self._send_json({"success": True, "jobs": jobs})
-
-    def _handle_gateway_report(self, body):
-        key = body.get("key") or self.headers.get("X-Gateway-Key")
-        if key != GATEWAY_API_KEY:
-            self._send_json({"error": "Unauthorized gateway key"}, status=HTTPStatus.UNAUTHORIZED)
-            return
-
-        msg_id = body.get("id")
-        status = body.get("status", "SENT")  # SENT, FAILED
-        error = body.get("error", "")
-
-        now = int(time.time())
-        conn = get_db()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            UPDATE sms_queue 
-            SET status = ?, error = ?, updated_at = ?
-            WHERE id = ?
-        """, (status, error, now, msg_id))
-
-        conn.commit()
-        conn.close()
-
-        self._send_json({"success": True})
-
 def run():
-    init_db()
-    import threading
+    """Initializes database and boots multithreaded servers on both ports."""
+    database.init_db()
 
-    def serve_on_port(port):
+    def listen_on(port):
         try:
-            httpd = ThreadingHTTPServer((HOST, port), SMSGatewayHandler)
-            print(f"  ✓ Listening on http://localhost:{port}")
+            httpd = ThreadingHTTPServer((config.HOST, port), ModularGatewayHandler)
+            print(f"  ✓ Listening on http://{config.HOST}:{port}")
             httpd.serve_forever()
         except Exception as e:
-            print(f"  Could not bind on port {port}: {e}")
+            print(f"  Failed to bind port {port}: {e}")
 
-    print(f"=======================================================")
-    print(f"  🚀 School SMS & OTP Gateway Server Running")
-    print(f"  Web Dashboard:  http://localhost:8000  OR  http://localhost:8080")
-    print(f"  Gateway Auth Key: {GATEWAY_API_KEY}")
-    print(f"=======================================================")
+    print("=======================================================")
+    print("  🚀 Modular School SMS Gateway Server (Overhaul)")
+    print(f"  Primary Tunnel Port:   {config.PRIMARY_PORT}")
+    print(f"  Secondary Port:        {config.SECONDARY_PORT}")
+    print(f"  Shared Secret Token:   {config.GATEWAY_SECRET_TOKEN[:6]}... (active)")
+    print(f"  Database Path:         {config.DB_PATH}")
+    print("=======================================================")
 
-    t = threading.Thread(target=serve_on_port, args=(8080,), daemon=True)
+    t = threading.Thread(target=listen_on, args=(config.SECONDARY_PORT,), daemon=True)
     t.start()
-    serve_on_port(8000)
+    listen_on(config.PRIMARY_PORT)
 
 if __name__ == "__main__":
     run()
