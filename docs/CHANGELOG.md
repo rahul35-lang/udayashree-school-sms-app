@@ -1,5 +1,26 @@
 # 📜 Changelog & Architecture Overhaul Log
 
+## [2.1.0] - 2026-10-16 - Live Cellular Verification & Telephony Hardening
+
+### Added
+- **Persistent Disk Logger (`Logger.java`):** Real-time diagnostic logging stored at `/sdcard/Android/data/com.school.smsgateway/files/gateway.log` with automatic 2MB size rotation and logcat mirroring.
+- **Autonomous Auto-Start Receivers:**
+  - `MY_PACKAGE_REPLACED`: Automatically resumes 24/7 background foreground daemon immediately upon APK install or update without manual intervention.
+  - `com.school.smsgateway.START_SERVICE`: Direct programmatic control via ADB broadcast.
+  - `com.school.smsgateway.TEST_HANDSHAKE`: Instant CLI diagnostic handshake triggering.
+- **Dynamic Pre-Shared Key Migration:** Seamlessly auto-migrates stale preferences from prototype key (`school_gateway_secret_2026`) to modern master key (`school_gateway_secret_2026_super_secure_token_np`).
+
+### Fixed
+- **Android 14+ Telephony Delivery Callback:** Registered `smsSentReceiver` with `Context.RECEIVER_EXPORTED` allowing `com.android.phone` system baseband radio process to deliver `RESULT_OK` callbacks back to the app.
+- **SQLite Concurrency & Lock Contention:** Configured `autocommit` mode (`isolation_level = None`), `PRAGMA busy_timeout = 30000`, and `PRAGMA synchronous = NORMAL` in `server/database.py` to eliminate `OperationalError: database is locked`.
+- **Legacy Schema Dual-Column Support:** Made `server/otp_service.py` dynamically compatible with both legacy `otp` and modern `otp_code` columns.
+
+### Verified
+- Live cellular SMS delivery from Vivo V2333 phone to cellular baseband via Cloudflare Tunnel `https://sms.success0.com.np`.
+- Live OTP generation, SMS queue dispatch, and end-to-end verification with single-use replay protection.
+
+---
+
 ## [2.0.0] - 2026-10-16 - Major Architecture Overhaul
 
 ### Added
