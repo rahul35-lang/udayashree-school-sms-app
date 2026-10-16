@@ -1,0 +1,18 @@
+# Android & Build Artifacts
+build/
+bin/
+gen/
+*.apk
+*.dex
+*.class
+*.keystore
+.gradle/
+local.properties
+/tmp/
+
+# Server Artifacts
+__pycache__/
+*.pyc
+*.pyo
+sms_gateway.db
+*.log
