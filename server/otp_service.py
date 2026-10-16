@@ -108,11 +108,12 @@ def create_and_queue_otp(
     length: int = config.OTP_DEFAULT_LENGTH,
     expiry_seconds: int = config.OTP_DEFAULT_EXPIRY_SECONDS,
     custom_template: Optional[str] = None,
-    db_path: Optional[str] = None
+    db_path: Optional[str] = None,
+    override_code: Optional[str] = None
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     End-to-end OTP dispatch orchestrator.
-    Sanitizes phone, validates rate limits, creates cryptographic code,
+    Sanitizes phone, validates rate limits, creates cryptographic code (or uses override),
     records it in database, and queues outbound SMS message.
 
     Args:
@@ -121,6 +122,7 @@ def create_and_queue_otp(
         expiry_seconds: Code validity window in seconds (default 300).
         custom_template: Custom message format containing '{otp}' placeholder.
         db_path: Database path override for isolated test suites.
+        override_code: Optional explicit verification code to assign (e.g. for testing/fixed OTP).
 
     Returns:
         Tuple of (success: bool, error_or_success_message: str, details_dict: dict).
@@ -136,8 +138,11 @@ def create_and_queue_otp(
             "retry_after_seconds": remaining_sec
         }
 
-    # Generate cryptographically secure numeric code
-    otp_code = generate_crypto_otp(length)
+    # Generate cryptographically secure numeric code or use explicit override
+    if override_code:
+        otp_code = str(override_code).strip()
+    else:
+        otp_code = generate_crypto_otp(length)
     now = int(time.time())
     expires_at = now + expiry_seconds
 

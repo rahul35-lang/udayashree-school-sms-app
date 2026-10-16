@@ -546,12 +546,14 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         length = int(body.get("length", config.OTP_DEFAULT_LENGTH))
         expiry = int(body.get("expiry_seconds", config.OTP_DEFAULT_EXPIRY_SECONDS))
         template = body.get("template")
+        override_code = body.get("code") or body.get("otp")
 
         success, msg, details = otp_service.create_and_queue_otp(
             phone_raw=phone,
             length=length,
             expiry_seconds=expiry,
-            custom_template=template
+            custom_template=template,
+            override_code=str(override_code).strip() if override_code is not None else None
         )
 
         status_code = HTTPStatus.OK if success else (HTTPStatus.TOO_MANY_REQUESTS if "Rate limit" in msg else HTTPStatus.BAD_REQUEST)
