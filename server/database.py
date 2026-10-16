@@ -87,6 +87,20 @@ def init_db(db_path: Optional[str] = None) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sms_queue_status ON sms_queue(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sms_queue_created ON sms_queue(created_at);")
 
+    # Auto-migration: ensure backward compatibility with older prototype database schemas
+    try:
+        cursor.execute("ALTER TABLE sms_queue ADD COLUMN error_reason TEXT;")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sms_queue ADD COLUMN retry_count INTEGER DEFAULT 0;")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE otp_verifications ADD COLUMN otp_code TEXT;")
+    except Exception:
+        pass
+
     # =========================================================================
     # TABLE 2: otp_verifications
     # =========================================================================

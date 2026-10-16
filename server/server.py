@@ -339,9 +339,13 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         """Handles browser pre-flight CORS negotiation."""
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Gateway-Token")
         self.end_headers()
+
+    def do_HEAD(self):
+        """Handles HTTP HEAD requests for health probes and uptime checkers."""
+        self.do_GET()
 
     def do_GET(self):
         """Dispatches HTTP GET requests."""
