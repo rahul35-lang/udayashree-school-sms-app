@@ -60,12 +60,9 @@ public class SmsSender {
                             if (info.getSimSlotIndex() == targetSlotIndex) {
                                 Logger.i(TAG, "✓ Selected SIM " + (targetSlotIndex + 1) +
                                         " [subId=" + info.getSubscriptionId() + ", " + info.getCarrierName() + "] for dispatch");
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                    return context.getSystemService(SmsManager.class)
-                                            .createForSubscriptionId(info.getSubscriptionId());
-                                } else {
-                                    return SmsManager.getSmsManagerForSubscriptionId(info.getSubscriptionId());
-                                }
+                                int subId = info.getSubscriptionId();
+                                Logger.i(TAG, "✓ Binding to Subscription ID " + subId + " for SIM " + (targetSlotIndex + 1));
+                                return SmsManager.getSmsManagerForSubscriptionId(subId);
                             }
                         }
                     }
