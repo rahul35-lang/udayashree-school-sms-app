@@ -52,6 +52,10 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.school.smsgateway.START_SERVICE" />
+                <action android:name="com.school.smsgateway.STOP_SERVICE" />
+                <action android:name="com.school.smsgateway.TEST_HANDSHAKE" />
             </intent-filter>
         </receiver>
 

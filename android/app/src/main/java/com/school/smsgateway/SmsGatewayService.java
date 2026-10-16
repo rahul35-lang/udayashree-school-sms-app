@@ -16,6 +16,7 @@ import android.os.BatteryManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.provider.Settings;
 import java.util.List;
 
 /**
@@ -24,15 +25,7 @@ import java.util.List;
  * PACKAGE: com.school.smsgateway
  * DESCRIPTION:
  *     24/7 Persistent Foreground Service executing background cellular tasks.
- *     Maintains continuous authenticated link with the server, sends low-bandwidth
- *     heartbeat keepalives, acquires pending SMS queue jobs, and coordinates
- *     cellular radio SMS dispatches.
- *
- * LIFECYCLE & RELIABILITY GUARANTEES:
- *     - Holds PARTIAL_WAKE_LOCK so CPU remains active while screen is asleep.
- *     - Holds WIFI_MODE_FULL_HIGH_PERF lock to prevent Wi-Fi power throttling.
- *     - Operates with NotificationChannel (START_STICKY) so Android OS
- *       restarts the service if briefly killed under extreme memory pressure.
+ *     Deeply instrumented with Logger diagnostics for real-time inspection.
  *
  * AUTHOR: School System Development Team
  * LAST MODIFIED: 2026-10-16
@@ -40,6 +33,7 @@ import java.util.List;
  */
 public class SmsGatewayService extends Service {
 
+    private static final String TAG = "SmsGatewayService";
     public static final String ACTION_UI_UPDATE = "com.school.smsgateway.UI_UPDATE";
     public static final String EXTRA_LOG_MSG = "log_msg";
     public static final String EXTRA_SENT_COUNT = "sent_count";
@@ -60,9 +54,6 @@ public class SmsGatewayService extends Service {
     private int totalSent = 0;
     private int totalFailed = 0;
 
-    /**
-     * BroadcastReceiver listening for cellular tower delivery reports.
-     */
     private final BroadcastReceiver smsSentReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -76,12 +67,16 @@ public class SmsGatewayService extends Service {
 
             if (success) {
                 totalSent++;
-                logToUi("✓ Cellular SMS delivered (Job #" + jobId + ")");
+                String msg = "✓ Cellular SMS delivered (Job #" + jobId + ")";
+                Logger.i(TAG, msg);
+                logToUi(msg);
                 new Thread(() -> ApiClient.reportJobStatus(serverUrl, token, jobId, "SENT", null)).start();
             } else {
                 totalFailed++;
                 String err = "Cellular Error Code: " + resultCode;
-                logToUi("✗ Cellular failed (Job #" + jobId + "): " + err);
+                String msg = "✗ Cellular failed (Job #" + jobId + "): " + err;
+                Logger.e(TAG, msg);
+                logToUi(msg);
                 new Thread(() -> ApiClient.reportJobStatus(serverUrl, token, jobId, "FAILED", err)).start();
             }
             updateNotification();
@@ -91,6 +86,8 @@ public class SmsGatewayService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        Logger.init(getApplicationContext());
+        Logger.i(TAG, "SmsGatewayService.onCreate invoked");
         createNotificationChannel();
 
         IntentFilter filter = new IntentFilter(SmsSender.ACTION_SMS_SENT);
@@ -104,31 +101,31 @@ public class SmsGatewayService extends Service {
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SchoolSMSGateway:WorkerWakeLock");
             wakeLock.acquire();
+            Logger.i(TAG, "WakeLock acquired: CPU power sleep disabled");
         }
 
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (wm != null) {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SchoolSMSGateway:WorkerWifiLock");
             wifiLock.acquire();
+            Logger.i(TAG, "WifiLock acquired: Wi-Fi deep sleep disabled");
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        Logger.i(TAG, "SmsGatewayService.onStartCommand flags=" + flags + " startId=" + startId);
         startForeground(NOTIF_ID, buildNotification("SMS Gateway Active - Connected to Cloudflare Tunnel"));
 
         if (!isRunning) {
             isRunning = true;
+            Logger.i(TAG, "Starting Gateway polling worker thread...");
             logToUi("🚀 SMS Gateway Service active in foreground.");
             startPollingLoop();
         }
         return START_STICKY;
     }
 
-    /**
-     * Main background worker loop.
-     * Alternates between lightweight heartbeats and pending job fetching.
-     */
     private void startPollingLoop() {
         pollingThread = new Thread(() -> {
             int heartbeatCounter = 0;
@@ -142,22 +139,24 @@ public class SmsGatewayService extends Service {
 
                     int batteryLevel = getBatteryLevel();
                     boolean isCharging = isCharging();
-                    String deviceId = Build.SERIAL != null ? Build.SERIAL : "android_phone";
+                    String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                    if (deviceId == null || deviceId.isEmpty()) {
+                        deviceId = "android_" + Build.MODEL;
+                    }
 
                     try {
-                        // 1. Fetch pending SMS jobs
                         List<ApiClient.SmsJob> jobs = ApiClient.pollPendingJobs(serverUrl, token, deviceId, batteryLevel);
                         broadcastStatus(System.currentTimeMillis());
 
                         if (jobs != null && !jobs.isEmpty()) {
+                            Logger.i(TAG, "Received " + jobs.size() + " job(s) from server queue");
                             logToUi("📥 Received " + jobs.size() + " SMS job(s) from server.");
                             for (ApiClient.SmsJob job : jobs) {
                                 logToUi("⏳ Cellular dispatching to: " + job.phone);
                                 SmsSender.sendSms(this, job.id, job.phone, job.message);
-                                Thread.sleep(700); // 700ms cell tower inter-message spacing
+                                Thread.sleep(700);
                             }
                         } else {
-                            // 2. Periodic low-bandwidth keepalive every ~15 seconds when queue is idle
                             heartbeatCounter++;
                             if (heartbeatCounter >= 5) {
                                 heartbeatCounter = 0;
@@ -165,17 +164,19 @@ public class SmsGatewayService extends Service {
                             }
                         }
                     } catch (Exception e) {
-                        // Network offline or temporary Wi-Fi packet drop; continue loop
+                        Logger.w(TAG, "Polling exception: " + e.getMessage());
                     }
 
                     Thread.sleep(Math.max(1000, intervalSec * 1000));
                 } catch (InterruptedException ie) {
+                    Logger.i(TAG, "Polling thread interrupted");
                     break;
                 } catch (Exception e) {
+                    Logger.e(TAG, "Unexpected error in poll loop: " + e.getMessage(), e);
                     try { Thread.sleep(3000); } catch (Exception ignored) {}
                 }
             }
-        });
+        }, "GatewayPollWorker");
         pollingThread.start();
     }
 
@@ -257,6 +258,7 @@ public class SmsGatewayService extends Service {
 
     @Override
     public void onDestroy() {
+        Logger.w(TAG, "SmsGatewayService.onDestroy invoked! Cleaning up resources...");
         isRunning = false;
         if (pollingThread != null) {
             pollingThread.interrupt();
@@ -267,9 +269,11 @@ public class SmsGatewayService extends Service {
 
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
+            Logger.i(TAG, "WakeLock released");
         }
         if (wifiLock != null && wifiLock.isHeld()) {
             wifiLock.release();
+            Logger.i(TAG, "WifiLock released");
         }
         logToUi("🛑 SMS Gateway Service stopped.");
         super.onDestroy();

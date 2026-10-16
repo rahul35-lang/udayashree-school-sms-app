@@ -10,6 +10,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.method.ScrollingMovementMethod;
 import android.view.View;
 import android.widget.Button;
@@ -27,8 +28,7 @@ import java.util.Locale;
  * PACKAGE: com.school.smsgateway
  * DESCRIPTION:
  *     Interactive Dashboard and Configuration Console for the Android Gateway.
- *     Allows administrators to inspect cellular liveness, test server handshake,
- *     dispatch test SMS directly, and view real-time cellular event logs.
+ *     Deeply instrumented with Logger diagnostics for real-time inspection.
  *
  * AUTHOR: School System Development Team
  * LAST MODIFIED: 2026-10-16
@@ -36,6 +36,7 @@ import java.util.Locale;
  */
 public class MainActivity extends Activity {
 
+    private static final String TAG = "MainActivity";
     private static final int PERMISSION_REQ_CODE = 101;
     private static final String DEFAULT_TUNNEL_URL = "https://sms.success0.com.np";
     private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
@@ -58,9 +59,6 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private final SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
 
-    /**
-     * BroadcastReceiver listening for real-time updates dispatched from SmsGatewayService.
-     */
     private final BroadcastReceiver uiReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -83,6 +81,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Logger.init(getApplicationContext());
+        Logger.i(TAG, "MainActivity.onCreate started");
+
         setContentView(R.layout.activity_main);
 
         prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
@@ -92,6 +93,21 @@ public class MainActivity extends Activity {
         requestNecessaryPermissions();
         BatteryOptimizationHelper.requestIgnoreBatteryOptimization(this);
         updateServiceStatusUi();
+
+        appendLog("System ready. Log path: " + Logger.getLogFilePath());
+
+        // --------------------------------------------------------------------
+        // AUTONOMOUS GATEWAY ACTIVATION
+        // If SEND_SMS permission is already granted, automatically initialize
+        // the 24/7 foreground polling daemon without waiting for manual tap.
+        // --------------------------------------------------------------------
+        if (checkSelfPermission(Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+            boolean autoStart = prefs.getBoolean("service_enabled", true);
+            if (autoStart) {
+                Logger.i(TAG, "Permissions already granted. Auto-starting SmsGatewayService...");
+                startGatewayService();
+            }
+        }
     }
 
     private void initViews() {
@@ -103,8 +119,8 @@ public class MainActivity extends Activity {
         etApiKey = findViewById(R.id.etApiKey);
         btnTestConnection = findViewById(R.id.btnTestConnection);
         btnToggleService = findViewById(R.id.btnToggleService);
-        btnPresetTunnel = findViewById(R.id.btnPresetUsb);    // Re-mapped to Cloudflare Tunnel
-        btnPresetLocal = findViewById(R.id.btnPresetWifi);    // Re-mapped to Local Server
+        btnPresetTunnel = findViewById(R.id.btnPresetUsb);
+        btnPresetLocal = findViewById(R.id.btnPresetWifi);
         etTestPhone = findViewById(R.id.etTestPhone);
         btnSendTestSms = findViewById(R.id.btnSendTestSms);
         tvLogs = findViewById(R.id.tvLogs);
@@ -112,14 +128,22 @@ public class MainActivity extends Activity {
 
         tvLogs.setMovementMethod(new ScrollingMovementMethod());
 
-        // Preset button click listeners
         btnPresetTunnel.setText("🌐 Cloudflare Tunnel");
-        btnPresetTunnel.setOnClickListener(v -> etServerUrl.setText(DEFAULT_TUNNEL_URL));
+        btnPresetTunnel.setOnClickListener(v -> {
+            Logger.i(TAG, "User clicked Preset Tunnel");
+            etServerUrl.setText(DEFAULT_TUNNEL_URL);
+        });
 
         btnPresetLocal.setText("🏠 Local Network");
-        btnPresetLocal.setOnClickListener(v -> etServerUrl.setText("http://192.168.2.231:8080"));
+        btnPresetLocal.setOnClickListener(v -> {
+            Logger.i(TAG, "User clicked Preset Local");
+            etServerUrl.setText("http://192.168.2.231:8080");
+        });
 
-        btnClearLogs.setOnClickListener(v -> tvLogs.setText("[Logs cleared]"));
+        btnClearLogs.setOnClickListener(v -> {
+            Logger.i(TAG, "User cleared UI logs");
+            tvLogs.setText("[Logs cleared]");
+        });
 
         btnTestConnection.setOnClickListener(v -> testServerHandshake());
         btnToggleService.setOnClickListener(v -> toggleService());
@@ -127,8 +151,16 @@ public class MainActivity extends Activity {
     }
 
     private void loadSettings() {
-        etServerUrl.setText(prefs.getString("server_url", DEFAULT_TUNNEL_URL));
-        etApiKey.setText(prefs.getString("api_key", DEFAULT_TOKEN));
+        String savedUrl = prefs.getString("server_url", DEFAULT_TUNNEL_URL);
+        String savedKey = prefs.getString("api_key", DEFAULT_TOKEN);
+        // Seamlessly migrate legacy pre-shared token if stale key remains in prefs
+        if ("school_gateway_secret_2026".equals(savedKey)) {
+            savedKey = DEFAULT_TOKEN;
+            prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
+            Logger.i(TAG, "Migrated legacy pre-shared token to secure default in device preferences");
+        }
+        etServerUrl.setText(savedUrl);
+        etApiKey.setText(savedKey);
     }
 
     private void saveSettings() {
@@ -136,6 +168,7 @@ public class MainActivity extends Activity {
                 .putString("server_url", ApiClient.normalizeUrl(etServerUrl.getText().toString().trim()))
                 .putString("api_key", etApiKey.getText().toString().trim())
                 .apply();
+        Logger.i(TAG, "Settings saved: url=" + etServerUrl.getText().toString());
     }
 
     private void toggleService() {
@@ -146,6 +179,7 @@ public class MainActivity extends Activity {
             stopGatewayService();
         } else {
             if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                Logger.w(TAG, "Cannot start service: SEND_SMS permission missing");
                 requestNecessaryPermissions();
                 Toast.makeText(this, "SMS Permission is required!", Toast.LENGTH_LONG).show();
                 return;
@@ -155,6 +189,7 @@ public class MainActivity extends Activity {
     }
 
     private void startGatewayService() {
+        Logger.i(TAG, "Starting Gateway Service requested by user");
         prefs.edit().putBoolean("service_enabled", true).apply();
         Intent intent = new Intent(this, SmsGatewayService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -167,6 +202,7 @@ public class MainActivity extends Activity {
     }
 
     private void stopGatewayService() {
+        Logger.i(TAG, "Stopping Gateway Service requested by user");
         prefs.edit().putBoolean("service_enabled", false).apply();
         stopService(new Intent(this, SmsGatewayService.class));
         updateServiceStatusUi();
@@ -192,22 +228,29 @@ public class MainActivity extends Activity {
         saveSettings();
         String url = etServerUrl.getText().toString().trim();
         String key = etApiKey.getText().toString().trim();
+        Logger.i(TAG, "Manual Handshake Test initiated to " + url);
         appendLog("Testing Handshake with: " + url + "...");
 
         new Thread(() -> {
+            String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+            if (deviceId == null || deviceId.isEmpty()) {
+                deviceId = "android_" + Build.MODEL;
+            }
             String error = ApiClient.performHandshake(
                     url,
                     key,
-                    Build.SERIAL != null ? Build.SERIAL : "android_phone",
-                    Build.MODEL,
+                    deviceId,
+                    Build.MANUFACTURER + " " + Build.MODEL,
                     100,
                     true
             );
             runOnUiThread(() -> {
                 if (error == null) {
+                    Logger.i(TAG, "Handshake test PASSED");
                     Toast.makeText(MainActivity.this, "✓ Handshake Successful! Connected.", Toast.LENGTH_SHORT).show();
                     appendLog("✓ Handshake verified: Server acknowledged token & hardware.");
                 } else {
+                    Logger.e(TAG, "Handshake test FAILED: " + error);
                     Toast.makeText(MainActivity.this, "✗ Handshake Failed: " + error, Toast.LENGTH_LONG).show();
                     appendLog("✗ Handshake error: " + error);
                 }
@@ -227,11 +270,13 @@ public class MainActivity extends Activity {
             return;
         }
 
+        Logger.i(TAG, "Direct Test SMS requested for phone " + phone);
         appendLog("Dispatching direct test SMS to " + phone + "...");
         try {
             SmsSender.sendSms(this, 99999, phone, "School Gateway Test SMS! Cellular dispatch verified.");
             Toast.makeText(this, "SMS submitted to cell tower!", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
+            Logger.e(TAG, "Direct Test SMS failed: " + e.getMessage(), e);
             appendLog("✗ Cellular Error: " + e.getMessage());
             Toast.makeText(this, "Failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
@@ -261,6 +306,24 @@ public class MainActivity extends Activity {
                 };
             }
             requestPermissions(permissions, PERMISSION_REQ_CODE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_REQ_CODE) {
+            boolean smsGranted = false;
+            for (int i = 0; i < permissions.length; i++) {
+                if (Manifest.permission.SEND_SMS.equals(permissions[i]) && grantResults[i] == PackageManager.PERMISSION_GRANTED) {
+                    smsGranted = true;
+                    break;
+                }
+            }
+            if (smsGranted) {
+                Logger.i(TAG, "SEND_SMS permission granted by user. Initializing gateway service...");
+                startGatewayService();
+            }
         }
     }
 

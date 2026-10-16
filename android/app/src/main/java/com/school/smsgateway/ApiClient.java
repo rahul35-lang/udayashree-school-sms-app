@@ -20,12 +20,7 @@ import java.util.List;
  *     Lightweight, Zero-Dependency HTTP & HTTPS Network Client.
  *     Communicates securely with the 24/7 central server over both local IP
  *     and public Cloudflare Tunnel domains (e.g., https://sms.success0.com.np).
- *
- * PROTOCOLS IMPLEMENTED:
- *     1. Mutual Token Handshake: /api/v1/gateway/handshake
- *     2. Low-Bandwidth Heartbeat: /api/v1/gateway/heartbeat
- *     3. Atomic SMS Job Acquisition: /api/v1/gateway/jobs
- *     4. Cellular Delivery Acknowledgment: /api/v1/gateway/report
+ *     Deeply instrumented with Logger diagnostics for transparent debugging.
  *
  * AUTHOR: School System Development Team
  * LAST MODIFIED: 2026-10-16
@@ -33,9 +28,8 @@ import java.util.List;
  */
 public class ApiClient {
 
-    /**
-     * Data Transfer Object representing an individual outbound SMS message job.
-     */
+    private static final String TAG = "ApiClient";
+
     public static class SmsJob {
         public final int id;
         public final String phone;
@@ -50,20 +44,12 @@ public class ApiClient {
         }
     }
 
-    /**
-     * Cleans and sanitizes user-entered server URLs.
-     * Automatically prepends 'https://' or 'http://' and removes trailing slashes.
-     *
-     * @param input Raw URL string entered by user or loaded from defaults.
-     * @return Formatted root URL (e.g. "https://sms.success0.com.np").
-     */
     public static String normalizeUrl(String input) {
         if (input == null || input.trim().isEmpty()) {
             return "https://sms.success0.com.np";
         }
         String s = input.trim();
         if (!s.startsWith("http://") && !s.startsWith("https://")) {
-            // Default to https if domain name, or http if local IP
             if (s.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}.*")) {
                 s = "http://" + s;
             } else {
@@ -73,17 +59,6 @@ public class ApiClient {
         return s.replaceAll("/+$", "");
     }
 
-    /**
-     * Executes initial mutual handshake with the 24/7 server.
-     *
-     * @param serverUrl Target server endpoint.
-     * @param token Master shared secret token.
-     * @param deviceId Unique hardware identifier.
-     * @param model Android phone hardware model (e.g. "Vivo V30").
-     * @param battery Current battery percentage (0-100).
-     * @param isCharging True if plugged into charger.
-     * @return Null on success, or diagnostic error message on failure.
-     */
     public static String performHandshake(
             String serverUrl,
             String token,
@@ -92,8 +67,11 @@ public class ApiClient {
             int battery,
             boolean isCharging
     ) {
+        String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/handshake";
+        long startTime = System.currentTimeMillis();
+        Logger.i(TAG, "Starting Handshake -> " + cleanUrl + " (Model: " + model + ", Battery: " + battery + "%)");
+
         try {
-            String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/handshake";
             URL url = new URL(cleanUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -117,27 +95,23 @@ public class ApiClient {
             os.close();
 
             int code = conn.getResponseCode();
+            long elapsed = System.currentTimeMillis() - startTime;
+            String respText = (code == 200) ? readStream(conn.getInputStream()) : readStream(conn.getErrorStream());
+
+            Logger.i(TAG, "Handshake Response HTTP " + code + " in " + elapsed + "ms -> " + respText);
+
             if (code == 200) {
                 return null; // Handshake successful!
             } else {
-                return "Handshake Rejected (HTTP " + code + ")";
+                return "Handshake Rejected (HTTP " + code + "): " + respText;
             }
         } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            Logger.e(TAG, "Handshake Exception after " + elapsed + "ms: " + e.getMessage(), e);
             return e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
 
-    /**
-     * Sends an ultra-low-bandwidth keepalive ping to the server.
-     * Consumes less than 120 bytes of network payload.
-     *
-     * @param serverUrl Target server endpoint.
-     * @param token Secret token.
-     * @param deviceId Unique device identifier.
-     * @param battery Battery level.
-     * @param isCharging Charger status.
-     * @return True if server acknowledged heartbeat; False otherwise.
-     */
     public static boolean sendHeartbeat(
             String serverUrl,
             String token,
@@ -145,8 +119,8 @@ public class ApiClient {
             int battery,
             boolean isCharging
     ) {
+        String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/heartbeat";
         try {
-            String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/heartbeat";
             URL url = new URL(cleanUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -169,20 +143,11 @@ public class ApiClient {
             int code = conn.getResponseCode();
             return code == 200;
         } catch (Exception e) {
+            Logger.w(TAG, "Heartbeat failed to " + cleanUrl + ": " + e.getMessage());
             return false;
         }
     }
 
-    /**
-     * Polls the server for pending cellular SMS jobs.
-     *
-     * @param serverUrl Target server endpoint.
-     * @param token Secret authentication token.
-     * @param deviceId Device identifier.
-     * @param batteryLevel Battery level.
-     * @return List of acquired SMS jobs, or empty list if none available.
-     * @throws Exception On network timeout or HTTP error.
-     */
     public static List<SmsJob> pollPendingJobs(
             String serverUrl,
             String token,
@@ -201,7 +166,9 @@ public class ApiClient {
 
         int code = conn.getResponseCode();
         if (code != 200) {
-            throw new Exception("HTTP error code: " + code);
+            String err = readStream(conn.getErrorStream());
+            Logger.w(TAG, "Poll failed HTTP " + code + " -> " + err);
+            throw new Exception("HTTP " + code + ": " + err);
         }
 
         String responseText = readStream(conn.getInputStream());
@@ -220,19 +187,12 @@ public class ApiClient {
                 ));
             }
         }
+        if (!jobs.isEmpty()) {
+            Logger.i(TAG, "Poll succeeded: Claimed " + jobs.size() + " job(s)");
+        }
         return jobs;
     }
 
-    /**
-     * Reports final cellular dispatch status back to the server.
-     *
-     * @param serverUrl Target server endpoint.
-     * @param token Secret authentication token.
-     * @param jobId Integer ID of the SMS job.
-     * @param status 'SENT' or 'FAILED'.
-     * @param error Diagnostic reason if failed.
-     * @return True if server recorded report; False otherwise.
-     */
     public static boolean reportJobStatus(
             String serverUrl,
             String token,
@@ -240,8 +200,10 @@ public class ApiClient {
             String status,
             String error
     ) {
+        String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/report";
+        Logger.i(TAG, "Reporting Job #" + jobId + " status=" + status + (error != null ? " error=" + error : ""));
+
         try {
-            String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/report";
             URL url = new URL(cleanUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -264,20 +226,28 @@ public class ApiClient {
             os.close();
 
             int code = conn.getResponseCode();
-            return code == 200;
+            boolean ok = (code == 200);
+            Logger.i(TAG, "Report Job #" + jobId + " result HTTP " + code);
+            return ok;
         } catch (Exception e) {
+            Logger.e(TAG, "Failed reporting Job #" + jobId + ": " + e.getMessage(), e);
             return false;
         }
     }
 
-    private static String readStream(InputStream is) throws Exception {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            sb.append(line);
+    private static String readStream(InputStream is) {
+        if (is == null) return "";
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line);
+            }
+            reader.close();
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
-        reader.close();
-        return sb.toString();
     }
 }
