@@ -18,6 +18,26 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import java.util.List;
 
+/**
+ * ============================================================================
+ * CLASS: SmsGatewayService
+ * PACKAGE: com.school.smsgateway
+ * DESCRIPTION:
+ *     24/7 Persistent Foreground Service executing background cellular tasks.
+ *     Maintains continuous authenticated link with the server, sends low-bandwidth
+ *     heartbeat keepalives, acquires pending SMS queue jobs, and coordinates
+ *     cellular radio SMS dispatches.
+ *
+ * LIFECYCLE & RELIABILITY GUARANTEES:
+ *     - Holds PARTIAL_WAKE_LOCK so CPU remains active while screen is asleep.
+ *     - Holds WIFI_MODE_FULL_HIGH_PERF lock to prevent Wi-Fi power throttling.
+ *     - Operates with NotificationChannel (START_STICKY) so Android OS
+ *       restarts the service if briefly killed under extreme memory pressure.
+ *
+ * AUTHOR: School System Development Team
+ * LAST MODIFIED: 2026-10-16
+ * ============================================================================
+ */
 public class SmsGatewayService extends Service {
 
     public static final String ACTION_UI_UPDATE = "com.school.smsgateway.UI_UPDATE";
@@ -26,8 +46,11 @@ public class SmsGatewayService extends Service {
     public static final String EXTRA_FAILED_COUNT = "failed_count";
     public static final String EXTRA_LAST_PING = "last_ping";
 
-    private static final String CHANNEL_ID = "school_sms_gateway_channel";
-    private static final int NOTIF_ID = 1001;
+    private static final String CHANNEL_ID = "school_sms_gateway_channel_v2";
+    private static final int NOTIF_ID = 2001;
+
+    private static final String DEFAULT_URL = "https://sms.success0.com.np";
+    private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -37,7 +60,10 @@ public class SmsGatewayService extends Service {
     private int totalSent = 0;
     private int totalFailed = 0;
 
-    private BroadcastReceiver smsSentReceiver = new BroadcastReceiver() {
+    /**
+     * BroadcastReceiver listening for cellular tower delivery reports.
+     */
+    private final BroadcastReceiver smsSentReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             int jobId = intent.getIntExtra(SmsSender.EXTRA_JOB_ID, -1);
@@ -45,18 +71,18 @@ public class SmsGatewayService extends Service {
             boolean success = (resultCode == Activity.RESULT_OK);
 
             SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
-            String serverUrl = prefs.getString("server_url", "http://192.168.1.100:8000");
-            String apiKey = prefs.getString("api_key", "school_gateway_secret_2026");
+            String serverUrl = prefs.getString("server_url", DEFAULT_URL);
+            String token = prefs.getString("api_key", DEFAULT_TOKEN);
 
             if (success) {
                 totalSent++;
-                logToUi("✓ SMS dispatched successfully (Job #" + jobId + ")");
-                new Thread(() -> ApiClient.reportJobStatus(serverUrl, apiKey, jobId, "SENT", null)).start();
+                logToUi("✓ Cellular SMS delivered (Job #" + jobId + ")");
+                new Thread(() -> ApiClient.reportJobStatus(serverUrl, token, jobId, "SENT", null)).start();
             } else {
                 totalFailed++;
-                String err = "Failure code: " + resultCode;
-                logToUi("✗ SMS failed (Job #" + jobId + "): " + err);
-                new Thread(() -> ApiClient.reportJobStatus(serverUrl, apiKey, jobId, "FAILED", err)).start();
+                String err = "Cellular Error Code: " + resultCode;
+                logToUi("✗ Cellular failed (Job #" + jobId + "): " + err);
+                new Thread(() -> ApiClient.reportJobStatus(serverUrl, token, jobId, "FAILED", err)).start();
             }
             updateNotification();
         }
@@ -76,56 +102,70 @@ public class SmsGatewayService extends Service {
 
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SchoolSMSGateway:WakeLock");
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SchoolSMSGateway:WorkerWakeLock");
             wakeLock.acquire();
         }
 
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (wm != null) {
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SchoolSMSGateway:WifiLock");
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SchoolSMSGateway:WorkerWifiLock");
             wifiLock.acquire();
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForeground(NOTIF_ID, buildNotification("SMS Gateway Active - Waiting for jobs..."));
+        startForeground(NOTIF_ID, buildNotification("SMS Gateway Active - Connected to Cloudflare Tunnel"));
 
         if (!isRunning) {
             isRunning = true;
-            logToUi("🚀 SMS Gateway Service started in foreground.");
+            logToUi("🚀 SMS Gateway Service active in foreground.");
             startPollingLoop();
         }
         return START_STICKY;
     }
 
+    /**
+     * Main background worker loop.
+     * Alternates between lightweight heartbeats and pending job fetching.
+     */
     private void startPollingLoop() {
         pollingThread = new Thread(() -> {
+            int heartbeatCounter = 0;
+
             while (isRunning) {
                 try {
                     SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
-                    String serverUrl = prefs.getString("server_url", "http://192.168.1.100:8000");
-                    String apiKey = prefs.getString("api_key", "school_gateway_secret_2026");
+                    String serverUrl = prefs.getString("server_url", DEFAULT_URL);
+                    String token = prefs.getString("api_key", DEFAULT_TOKEN);
                     int intervalSec = prefs.getInt("interval_sec", 3);
 
                     int batteryLevel = getBatteryLevel();
                     boolean isCharging = isCharging();
+                    String deviceId = Build.SERIAL != null ? Build.SERIAL : "android_phone";
 
                     try {
-                        List<ApiClient.SmsJob> jobs = ApiClient.pollPendingJobs(serverUrl, apiKey, batteryLevel, isCharging);
+                        // 1. Fetch pending SMS jobs
+                        List<ApiClient.SmsJob> jobs = ApiClient.pollPendingJobs(serverUrl, token, deviceId, batteryLevel);
                         broadcastStatus(System.currentTimeMillis());
 
                         if (jobs != null && !jobs.isEmpty()) {
                             logToUi("📥 Received " + jobs.size() + " SMS job(s) from server.");
                             for (ApiClient.SmsJob job : jobs) {
-                                logToUi("⏳ Sending to: " + job.phone);
+                                logToUi("⏳ Cellular dispatching to: " + job.phone);
                                 SmsSender.sendSms(this, job.id, job.phone, job.message);
-                                Thread.sleep(600); // 600ms spacing between cellular messages
+                                Thread.sleep(700); // 700ms cell tower inter-message spacing
+                            }
+                        } else {
+                            // 2. Periodic low-bandwidth keepalive every ~15 seconds when queue is idle
+                            heartbeatCounter++;
+                            if (heartbeatCounter >= 5) {
+                                heartbeatCounter = 0;
+                                ApiClient.sendHeartbeat(serverUrl, token, deviceId, batteryLevel, isCharging);
                             }
                         }
                     } catch (Exception e) {
-                        // Network error or server offline
-                        // logToUi("⚠️ Ping failed: " + e.getMessage());
+                        // Network offline or temporary Wi-Fi packet drop; continue loop
                     }
 
                     Thread.sleep(Math.max(1000, intervalSec * 1000));
@@ -200,7 +240,7 @@ public class SmsGatewayService extends Service {
         }
 
         return builder
-                .setContentTitle("School SMS Gateway (Active)")
+                .setContentTitle("School SMS Gateway (Online)")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentIntent(pi)
@@ -211,7 +251,7 @@ public class SmsGatewayService extends Service {
     private void updateNotification() {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
-            nm.notify(NOTIF_ID, buildNotification("Sent: " + totalSent + " | Failed: " + totalFailed));
+            nm.notify(NOTIF_ID, buildNotification("Dispatched: " + totalSent + " | Cellular Failures: " + totalFailed));
         }
     }
 

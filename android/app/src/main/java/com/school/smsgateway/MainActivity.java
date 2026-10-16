@@ -21,9 +21,24 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+/**
+ * ============================================================================
+ * CLASS: MainActivity
+ * PACKAGE: com.school.smsgateway
+ * DESCRIPTION:
+ *     Interactive Dashboard and Configuration Console for the Android Gateway.
+ *     Allows administrators to inspect cellular liveness, test server handshake,
+ *     dispatch test SMS directly, and view real-time cellular event logs.
+ *
+ * AUTHOR: School System Development Team
+ * LAST MODIFIED: 2026-10-16
+ * ============================================================================
+ */
 public class MainActivity extends Activity {
 
     private static final int PERMISSION_REQ_CODE = 101;
+    private static final String DEFAULT_TUNNEL_URL = "https://sms.success0.com.np";
+    private static final String DEFAULT_TOKEN = "school_gateway_secret_2026_super_secure_token_np";
 
     private TextView tvStatusBadge;
     private TextView tvStatSent;
@@ -33,6 +48,8 @@ public class MainActivity extends Activity {
     private EditText etApiKey;
     private Button btnTestConnection;
     private Button btnToggleService;
+    private Button btnPresetTunnel;
+    private Button btnPresetLocal;
     private EditText etTestPhone;
     private Button btnSendTestSms;
     private TextView tvLogs;
@@ -41,6 +58,9 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private final SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
 
+    /**
+     * BroadcastReceiver listening for real-time updates dispatched from SmsGatewayService.
+     */
     private final BroadcastReceiver uiReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -70,6 +90,7 @@ public class MainActivity extends Activity {
         initViews();
         loadSettings();
         requestNecessaryPermissions();
+        BatteryOptimizationHelper.requestIgnoreBatteryOptimization(this);
         updateServiceStatusUi();
     }
 
@@ -82,6 +103,8 @@ public class MainActivity extends Activity {
         etApiKey = findViewById(R.id.etApiKey);
         btnTestConnection = findViewById(R.id.btnTestConnection);
         btnToggleService = findViewById(R.id.btnToggleService);
+        btnPresetTunnel = findViewById(R.id.btnPresetUsb);    // Re-mapped to Cloudflare Tunnel
+        btnPresetLocal = findViewById(R.id.btnPresetWifi);    // Re-mapped to Local Server
         etTestPhone = findViewById(R.id.etTestPhone);
         btnSendTestSms = findViewById(R.id.btnSendTestSms);
         tvLogs = findViewById(R.id.tvLogs);
@@ -89,21 +112,28 @@ public class MainActivity extends Activity {
 
         tvLogs.setMovementMethod(new ScrollingMovementMethod());
 
+        // Preset button click listeners
+        btnPresetTunnel.setText("🌐 Cloudflare Tunnel");
+        btnPresetTunnel.setOnClickListener(v -> etServerUrl.setText(DEFAULT_TUNNEL_URL));
+
+        btnPresetLocal.setText("🏠 Local Network");
+        btnPresetLocal.setOnClickListener(v -> etServerUrl.setText("http://192.168.2.231:8080"));
+
         btnClearLogs.setOnClickListener(v -> tvLogs.setText("[Logs cleared]"));
 
-        btnTestConnection.setOnClickListener(v -> testServerConnection());
+        btnTestConnection.setOnClickListener(v -> testServerHandshake());
         btnToggleService.setOnClickListener(v -> toggleService());
         btnSendTestSms.setOnClickListener(v -> sendDirectTestSms());
     }
 
     private void loadSettings() {
-        etServerUrl.setText(prefs.getString("server_url", "http://127.0.0.1:8000"));
-        etApiKey.setText(prefs.getString("api_key", "school_gateway_secret_2026"));
+        etServerUrl.setText(prefs.getString("server_url", DEFAULT_TUNNEL_URL));
+        etApiKey.setText(prefs.getString("api_key", DEFAULT_TOKEN));
     }
 
     private void saveSettings() {
         prefs.edit()
-                .putString("server_url", etServerUrl.getText().toString().trim())
+                .putString("server_url", ApiClient.normalizeUrl(etServerUrl.getText().toString().trim()))
                 .putString("api_key", etApiKey.getText().toString().trim())
                 .apply();
     }
@@ -158,21 +188,28 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void testServerConnection() {
+    private void testServerHandshake() {
         saveSettings();
         String url = etServerUrl.getText().toString().trim();
         String key = etApiKey.getText().toString().trim();
-        appendLog("Testing connection to: " + url + "...");
+        appendLog("Testing Handshake with: " + url + "...");
 
         new Thread(() -> {
-            String error = ApiClient.testConnection(url, key);
+            String error = ApiClient.performHandshake(
+                    url,
+                    key,
+                    Build.SERIAL != null ? Build.SERIAL : "android_phone",
+                    Build.MODEL,
+                    100,
+                    true
+            );
             runOnUiThread(() -> {
                 if (error == null) {
-                    Toast.makeText(MainActivity.this, "✓ Server Connected Successfully!", Toast.LENGTH_SHORT).show();
-                    appendLog("✓ Connected! Server is reachable.");
+                    Toast.makeText(MainActivity.this, "✓ Handshake Successful! Connected.", Toast.LENGTH_SHORT).show();
+                    appendLog("✓ Handshake verified: Server acknowledged token & hardware.");
                 } else {
-                    Toast.makeText(MainActivity.this, "✗ Error: " + error, Toast.LENGTH_LONG).show();
-                    appendLog("✗ Connection failed: " + error);
+                    Toast.makeText(MainActivity.this, "✗ Handshake Failed: " + error, Toast.LENGTH_LONG).show();
+                    appendLog("✗ Handshake error: " + error);
                 }
             });
         }).start();
@@ -190,12 +227,12 @@ public class MainActivity extends Activity {
             return;
         }
 
-        appendLog("Sending direct test SMS to " + phone + "...");
+        appendLog("Dispatching direct test SMS to " + phone + "...");
         try {
-            SmsSender.sendSms(this, 99999, phone, "Test SMS from School SMS Gateway! Cellular dispatch verified.");
-            Toast.makeText(this, "SMS request sent to cell tower!", Toast.LENGTH_SHORT).show();
+            SmsSender.sendSms(this, 99999, phone, "School Gateway Test SMS! Cellular dispatch verified.");
+            Toast.makeText(this, "SMS submitted to cell tower!", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            appendLog("✗ Direct SMS Error: " + e.getMessage());
+            appendLog("✗ Cellular Error: " + e.getMessage());
             Toast.makeText(this, "Failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
@@ -204,8 +241,8 @@ public class MainActivity extends Activity {
         String time = timeFormat.format(new Date());
         String current = tvLogs.getText().toString();
         String newLogs = "[" + time + "] " + msg + "\n" + current;
-        if (newLogs.length() > 2500) {
-            newLogs = newLogs.substring(0, 2500);
+        if (newLogs.length() > 3000) {
+            newLogs = newLogs.substring(0, 3000);
         }
         tvLogs.setText(newLogs);
     }

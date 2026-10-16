@@ -1,192 +1,69 @@
-# 📱 School SMS & OTP Gateway
+# 📱 School SMS & OTP Gateway (v2.0)
 
-A self-hosted, 24/7 cellular SMS and Parent Verification Gateway for school apps and systems. Uses an Android smartphone with any active cellular SIM card to dispatch OTPs and SMS alerts autonomously.
-
----
-
-## 🏗️ Architecture Overview
-
-```
-                      ┌──────────────────────┐
-                      │    School App / UI   │
-                      │  (Parent enters No.) │
-                      └──────────┬───────────┘
-                                 │
-                   1. POST /api/otp/send
-                                 ▼
-                      ┌──────────────────────┐
-                      │    24/7 Server       │
-                      │  (server/server.py)  │
-                      └──────────┬───────────┘
-                                 │
-           2. Android Phone polls /api/gateway/poll
-                                 ▼
-                      ┌──────────────────────┐
-                      │  Android Gateway App │
-                      │ (Foreground Service) │
-                      └──────────┬───────────┘
-                                 │
-                     3. Cellular SMS Dispatch
-                                 ▼
-                      ┌──────────────────────┐
-                      │    Parent's Phone    │
-                      │   (Receives OTP SMS) │
-                      └──────────────────────┘
-```
+A self-hosted, 24/7 modular cellular SMS and Parent Verification Gateway for school applications. Uses an Android smartphone with any active cellular SIM card to dispatch OTPs and SMS alerts autonomously over a secure Cloudflare Tunnel.
 
 ---
 
-## 🚀 Quick Start Guide
+## 📚 Complete Documentation Index
 
-### 1. Launch the Server on your 24/7 Machine
+For detailed documentation, please navigate to the [`docs/`](file:///home/rahul/SchoolSMSGateway/docs/) folder:
 
-The server is standalone with **zero external dependencies** (uses standard Python 3 + SQLite).
+| Document | Link | Description |
+| :--- | :--- | :--- |
+| **System Architecture** | [`docs/ARCHITECTURE.md`](file:///home/rahul/SchoolSMSGateway/docs/ARCHITECTURE.md) | System design, Cloudflare Tunnel topology, state machine, and security. |
+| **REST API Specification** | [`docs/API_SPECIFICATION.md`](file:///home/rahul/SchoolSMSGateway/docs/API_SPECIFICATION.md) | Exhaustive API endpoint reference, handshake protocol, and payload examples. |
+| **Android Gateway Module** | [`docs/ANDROID_MODULE.md`](file:///home/rahul/SchoolSMSGateway/docs/ANDROID_MODULE.md) | Foreground service lifecycle, battery optimization bypass, wakelocks, SMS chunking. |
+| **24/7 Deployment Guide** | [`docs/DEPLOYMENT_GUIDE.md`](file:///home/rahul/SchoolSMSGateway/docs/DEPLOYMENT_GUIDE.md) | Cloudflare tunnel routing on `root@100.89.137.102` and systemd 24/7 service. |
+| **Changelog & History** | [`docs/CHANGELOG.md`](file:///home/rahul/SchoolSMSGateway/docs/CHANGELOG.md) | Commit history, modular overhaul records, and feature additions. |
 
+---
+
+## ⚡ Quick Start
+
+### 1. Run Automated Unit Tests (100% Passing)
 ```bash
-cd /home/rahul/SchoolSMSGateway/server
-./run_server.sh
+python3 /home/rahul/SchoolSMSGateway/tests/run_all_tests.py
 ```
+*Executes all 30 unit tests across authentication, database, queue, OTP engine, and HTTP endpoints in under 1.5 seconds.*
 
-- **Web Dashboard**: Open `http://localhost:8000` in your browser.
-- **Default Gateway Key**: `school_gateway_secret_2026`
+### 2. Start the Server
+```bash
+/home/rahul/SchoolSMSGateway/server/run_server.sh
+```
+- **Local Dashboard:** `http://localhost:8080` (or `http://localhost:8000`)
+- **Cloudflare Public Tunnel:** `https://sms.success0.com.np`
 
----
+### 3. Install the Android Gateway App
+The pre-compiled, signed APK is located at:
+- [`/home/rahul/Desktop/SchoolSMSGateway.apk`](file:///home/rahul/Desktop/SchoolSMSGateway.apk)
 
-### 2. Install the Android Gateway App on Phone
-
-The compiled, signed APK is located at:
-- `/home/rahul/Desktop/SchoolSMSGateway.apk`
-- `/home/rahul/SchoolSMSGateway/android/SchoolSMSGateway.apk`
-
-#### Option A: 1-Click ADB Auto-Installer (Recommended)
-Connect your Android phone to this PC via USB cable (with USB Debugging enabled in Developer Options):
-
+Connect phone via USB and run:
 ```bash
 /home/rahul/SchoolSMSGateway/android/install_phone.sh
 ```
-
-#### Option B: Manual Install
-1. Copy `SchoolSMSGateway.apk` to your phone (via USB file transfer, Google Drive, WhatsApp, or Bluetooth).
-2. Tap the APK on your phone and choose **Install**.
-3. Allow the SMS and Notification permissions when prompted.
+Or transfer `SchoolSMSGateway.apk` to the phone and tap to install.
 
 ---
 
-### 3. Connect the Phone to Server
+## 🔌 API Integration Example
 
-1. Open **School SMS Gateway** on your Android phone.
-2. Enter your Server's IP address (e.g. `http://192.168.1.100:8000` or your domain/VPS URL).
-3. Enter the Gateway Secret Key: `school_gateway_secret_2026`.
-4. Tap **"Test Connection"** — it will confirm the phone can reach the server.
-5. Tap **"START SERVICE"**.
-   - The status badge will switch to green **ACTIVE**.
-   - A persistent foreground notification will keep the app running 24/7 even with the screen locked.
-
----
-
-## 🔌 School App API Integration Guide
-
-### 1. Send OTP to Parent
-When the parent types their phone number in the school app:
-
-**Endpoint:** `POST http://<server-ip>:8000/api/otp/send`
-
-**Request Body (JSON):**
-```json
-{
-  "phone": "9841234567",
-  "length": 6,
-  "expiry_seconds": 300
-}
-```
-
-**Success Response (200):**
-```json
-{
-  "success": true,
-  "message_id": 14,
-  "phone": "9841234567",
-  "expires_in": 300
-}
-```
-
-*Note: Rate limiting automatically protects against spam by requiring 60 seconds between requests for the same number.*
-
----
-
-### 2. Verify OTP
-When the parent submits the 6-digit OTP code received on their phone:
-
-**Endpoint:** `POST http://<server-ip>:8000/api/otp/verify`
-
-**Request Body (JSON):**
-```json
-{
-  "phone": "9841234567",
-  "otp": "724166"
-}
-```
-
-**Success Response (200):**
-```json
-{
-  "success": true,
-  "message": "Phone number verified successfully!"
-}
-```
-
-**Error Response (400):**
-```json
-{
-  "success": false,
-  "error": "Incorrect OTP code. Please try again."
-}
-```
-
----
-
-### 3. Send General School Notification SMS
-For sending attendance alerts, exam results, or fee reminders:
-
-**Endpoint:** `POST http://<server-ip>:8000/api/sms/send`
-
-**Request Body (JSON):**
-```json
-{
-  "phone": "9841234567",
-  "message": "Dear Parent, your child Rahul was marked present today at 09:15 AM."
-}
-```
-
----
-
-## 🛠️ Running the Server as a 24/7 System Service (systemd)
-
-To ensure the server restarts automatically if the computer reboots:
-
-Create `/etc/systemd/system/school-sms.service`:
-```ini
-[Unit]
-Description=School SMS & OTP Gateway Server
-After=network.target
-
-[Service]
-Type=simple
-User=rahul
-WorkingDirectory=/home/rahul/SchoolSMSGateway/server
-ExecStart=/usr/bin/python3 /home/rahul/SchoolSMSGateway/server/server.py
-Restart=always
-RestartSec=5
-Environment=PORT=8000
-Environment=GATEWAY_API_KEY=school_gateway_secret_2026
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start it:
+### 1. Request OTP (Parent Mobile Number Verification)
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable school-sms
-sudo systemctl start school-sms
+curl -X POST https://sms.success0.com.np/api/v1/otp/send \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "9841234567"}'
+```
+
+### 2. Verify OTP (Validate Code Submitted by Parent)
+```bash
+curl -X POST https://sms.success0.com.np/api/v1/otp/verify \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "9841234567", "otp": "482910"}'
+```
+
+### 3. Send School Announcement SMS
+```bash
+curl -X POST https://sms.success0.com.np/api/v1/sms/send \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "9841234567", "message": "Dear Parent, your child was marked present today."}'
 ```
