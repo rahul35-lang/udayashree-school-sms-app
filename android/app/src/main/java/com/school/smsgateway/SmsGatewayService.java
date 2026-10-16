@@ -153,9 +153,11 @@ public class SmsGatewayService extends Service {
                         if (jobs != null && !jobs.isEmpty()) {
                             Logger.i(TAG, "Received " + jobs.size() + " job(s) from server queue");
                             logToUi("📥 Received " + jobs.size() + " SMS job(s) from server.");
+                            int preferredSim = prefs.getInt("preferred_sim_slot", 1); // 1 = SIM 2 (default)
                             for (ApiClient.SmsJob job : jobs) {
-                                logToUi("⏳ Cellular dispatching to: " + job.phone);
-                                SmsSender.sendSms(this, job.id, job.phone, job.message);
+                                int targetSlot = (job.simSlot > 0) ? (job.simSlot - 1) : preferredSim;
+                                logToUi("⏳ Cellular dispatching via SIM " + (targetSlot + 1) + " to: " + job.phone);
+                                SmsSender.sendSms(this, job.id, job.phone, job.message, targetSlot);
                                 Thread.sleep(700);
                             }
                         } else {

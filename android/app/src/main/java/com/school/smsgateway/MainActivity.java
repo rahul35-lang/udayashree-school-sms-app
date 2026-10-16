@@ -159,6 +159,12 @@ public class MainActivity extends Activity {
             prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
             Logger.i(TAG, "Migrated legacy pre-shared token to secure default in device preferences");
         }
+
+        // Ensure SIM 2 (slot index 1) is configured as active default cellular dispatcher
+        if (!prefs.contains("preferred_sim_slot") || prefs.getInt("preferred_sim_slot", -1) != 1) {
+            prefs.edit().putInt("preferred_sim_slot", 1).apply();
+            Logger.i(TAG, "Configured preferred cellular SIM slot to SIM 2 (slot index 1)");
+        }
         etServerUrl.setText(savedUrl);
         etApiKey.setText(savedKey);
     }
