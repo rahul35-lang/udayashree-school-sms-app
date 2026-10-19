@@ -198,6 +198,7 @@ public class MainActivity extends Activity {
     private void startGatewayService() {
         Logger.i(TAG, "Starting Gateway Service requested by user");
         prefs.edit().putBoolean("service_enabled", true).apply();
+        BootReceiver.scheduleWatchdog(this);
         Intent intent = new Intent(this, SmsGatewayService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent);
@@ -211,6 +212,7 @@ public class MainActivity extends Activity {
     private void stopGatewayService() {
         Logger.i(TAG, "Stopping Gateway Service requested by user");
         prefs.edit().putBoolean("service_enabled", false).apply();
+        BootReceiver.cancelWatchdog(this);
         stopService(new Intent(this, SmsGatewayService.class));
         updateServiceStatusUi();
         appendLog("🛑 Stopped Gateway Service.");

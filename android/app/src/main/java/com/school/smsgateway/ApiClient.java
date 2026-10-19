@@ -71,10 +71,12 @@ public class ApiClient {
         long startTime = System.currentTimeMillis();
         Logger.i(TAG, "Starting Handshake -> " + cleanUrl + " (Model: " + model + ", Battery: " + battery + "%)");
 
+        HttpURLConnection conn = null;
         try {
             URL url = new URL(cleanUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
+            conn.setRequestProperty("Connection", "close");
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             conn.setRequestProperty("X-Gateway-Token", token);
             conn.setDoOutput(true);
@@ -109,6 +111,10 @@ public class ApiClient {
             long elapsed = System.currentTimeMillis() - startTime;
             Logger.e(TAG, "Handshake Exception after " + elapsed + "ms: " + e.getMessage(), e);
             return e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
@@ -120,10 +126,12 @@ public class ApiClient {
             boolean isCharging
     ) {
         String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/heartbeat";
+        HttpURLConnection conn = null;
         try {
             URL url = new URL(cleanUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
+            conn.setRequestProperty("Connection", "close");
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             conn.setRequestProperty("X-Gateway-Token", token);
             conn.setDoOutput(true);
@@ -141,10 +149,19 @@ public class ApiClient {
             os.close();
 
             int code = conn.getResponseCode();
+            if (code == 200) {
+                readStream(conn.getInputStream());
+            } else {
+                readStream(conn.getErrorStream());
+            }
             return code == 200;
         } catch (Exception e) {
             Logger.w(TAG, "Heartbeat failed to " + cleanUrl + ": " + e.getMessage());
             return false;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
@@ -157,40 +174,48 @@ public class ApiClient {
         String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/jobs?device_id=" +
                 deviceId + "&battery=" + batteryLevel;
 
-        URL url = new URL(cleanUrl);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("GET");
-        conn.setRequestProperty("X-Gateway-Token", token);
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(8000);
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(cleanUrl);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Connection", "close");
+            conn.setRequestProperty("X-Gateway-Token", token);
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
 
-        int code = conn.getResponseCode();
-        if (code != 200) {
-            String err = readStream(conn.getErrorStream());
-            Logger.w(TAG, "Poll failed HTTP " + code + " -> " + err);
-            throw new Exception("HTTP " + code + ": " + err);
-        }
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                String err = readStream(conn.getErrorStream());
+                Logger.w(TAG, "Poll failed HTTP " + code + " -> " + err);
+                throw new Exception("HTTP " + code + ": " + err);
+            }
 
-        String responseText = readStream(conn.getInputStream());
-        JSONObject json = new JSONObject(responseText);
+            String responseText = readStream(conn.getInputStream());
+            JSONObject json = new JSONObject(responseText);
 
-        List<SmsJob> jobs = new ArrayList<>();
-        if (json.optBoolean("success", false) && json.has("jobs")) {
-            JSONArray arr = json.getJSONArray("jobs");
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject obj = arr.getJSONObject(i);
-                jobs.add(new SmsJob(
-                        obj.getInt("id"),
-                        obj.getString("phone"),
-                        obj.getString("message"),
-                        obj.optInt("sim_slot", 0)
-                ));
+            List<SmsJob> jobs = new ArrayList<>();
+            if (json.optBoolean("success", false) && json.has("jobs")) {
+                JSONArray arr = json.getJSONArray("jobs");
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject obj = arr.getJSONObject(i);
+                    jobs.add(new SmsJob(
+                            obj.getInt("id"),
+                            obj.getString("phone"),
+                            obj.getString("message"),
+                            obj.optInt("sim_slot", 0)
+                    ));
+                }
+            }
+            if (!jobs.isEmpty()) {
+                Logger.i(TAG, "Poll succeeded: Claimed " + jobs.size() + " job(s)");
+            }
+            return jobs;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
             }
         }
-        if (!jobs.isEmpty()) {
-            Logger.i(TAG, "Poll succeeded: Claimed " + jobs.size() + " job(s)");
-        }
-        return jobs;
     }
 
     public static boolean reportJobStatus(
@@ -203,10 +228,12 @@ public class ApiClient {
         String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/report";
         Logger.i(TAG, "Reporting Job #" + jobId + " status=" + status + (error != null ? " error=" + error : ""));
 
+        HttpURLConnection conn = null;
         try {
             URL url = new URL(cleanUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
+            conn.setRequestProperty("Connection", "close");
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             conn.setRequestProperty("X-Gateway-Token", token);
             conn.setDoOutput(true);
@@ -227,27 +254,37 @@ public class ApiClient {
 
             int code = conn.getResponseCode();
             boolean ok = (code == 200);
+            if (ok) {
+                readStream(conn.getInputStream());
+            } else {
+                readStream(conn.getErrorStream());
+            }
             Logger.i(TAG, "Report Job #" + jobId + " result HTTP " + code);
             return ok;
         } catch (Exception e) {
             Logger.e(TAG, "Failed reporting Job #" + jobId + ": " + e.getMessage(), e);
             return false;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
     private static String readStream(InputStream is) {
         if (is == null) return "";
-        try {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-            StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 sb.append(line);
             }
-            reader.close();
-            return sb.toString();
-        } catch (Exception e) {
-            return "";
+        } catch (Exception ignored) {
+        } finally {
+            try {
+                is.close();
+            } catch (Exception ignored) {}
         }
+        return sb.toString();
     }
 }

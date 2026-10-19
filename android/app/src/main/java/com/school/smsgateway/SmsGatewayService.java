@@ -11,6 +11,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
@@ -25,10 +28,12 @@ import java.util.List;
  * PACKAGE: com.school.smsgateway
  * DESCRIPTION:
  *     24/7 Persistent Foreground Service executing background cellular tasks.
+ *     Features self-healing watchdog persistence, unkillable lifecycle guards,
+ *     and dynamic network reconnection wakeups.
  *     Deeply instrumented with Logger diagnostics for real-time inspection.
  *
  * AUTHOR: School System Development Team
- * LAST MODIFIED: 2026-10-16
+ * LAST MODIFIED: 2026-10-19
  * ============================================================================
  */
 public class SmsGatewayService extends Service {
@@ -46,10 +51,18 @@ public class SmsGatewayService extends Service {
     private static final String DEFAULT_URL = "https://sms.success0.com.np";
     private static final String DEFAULT_TOKEN = "Udaya@momphone";
 
+    private static volatile boolean isServiceAlive = false;
+
+    public static boolean isServiceRunning() {
+        return isServiceAlive;
+    }
+
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
     private Thread pollingThread;
     private volatile boolean isRunning = false;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     private int totalSent = 0;
     private int totalFailed = 0;
@@ -86,9 +99,13 @@ public class SmsGatewayService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        isServiceAlive = true;
         Logger.init(getApplicationContext());
         Logger.i(TAG, "SmsGatewayService.onCreate invoked");
         createNotificationChannel();
+
+        // Ensure watchdog is immediately armed
+        BootReceiver.scheduleWatchdog(this);
 
         IntentFilter filter = new IntentFilter(SmsSender.ACTION_SMS_SENT);
         // Telephony system daemon (com.android.phone) fires the PendingIntent callback,
@@ -112,12 +129,50 @@ public class SmsGatewayService extends Service {
             wifiLock.acquire();
             Logger.i(TAG, "WifiLock acquired: Wi-Fi deep sleep disabled");
         }
+
+        // Register dynamic network callback for instant recovery on reconnection
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivityManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    Logger.i(TAG, "Network connection RESTORED. Waking polling thread...");
+                    if (pollingThread != null && pollingThread.isAlive()) {
+                        pollingThread.interrupt();
+                    }
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    Logger.w(TAG, "Network connection LOST. Poller awaiting recovery.");
+                }
+            };
+            try {
+                connectivityManager.registerDefaultNetworkCallback(networkCallback);
+                Logger.i(TAG, "Registered NetworkCallback for active connectivity tracking");
+            } catch (Exception e) {
+                Logger.w(TAG, "Failed registering NetworkCallback: " + e.getMessage());
+            }
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        isServiceAlive = true;
         Logger.i(TAG, "SmsGatewayService.onStartCommand flags=" + flags + " startId=" + startId);
-        startForeground(NOTIF_ID, buildNotification("SMS Gateway Active - Connected to Cloudflare Tunnel"));
+
+        Notification notification = buildNotification("SMS Gateway Active - Connected to Cloudflare Tunnel");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+            }
+            startForeground(NOTIF_ID, notification, serviceType);
+        } else {
+            startForeground(NOTIF_ID, notification);
+        }
+
+        BootReceiver.scheduleWatchdog(this);
 
         if (!isRunning) {
             isRunning = true;
@@ -168,9 +223,12 @@ public class SmsGatewayService extends Service {
                             }
                         } else {
                             heartbeatCounter++;
-                            if (heartbeatCounter >= 5) {
+                            if (heartbeatCounter >= 10) {
                                 heartbeatCounter = 0;
-                                ApiClient.sendHeartbeat(serverUrl, token, deviceId, batteryLevel, isCharging);
+                                boolean hb = ApiClient.sendHeartbeat(serverUrl, token, deviceId, batteryLevel, isCharging);
+                                if (hb) {
+                                    Logger.i(TAG, "Heartbeat healthy -> server acknowledged device alive");
+                                }
                             }
                         }
                     } catch (Exception e) {
@@ -179,8 +237,12 @@ public class SmsGatewayService extends Service {
 
                     Thread.sleep(Math.max(1000, intervalSec * 1000));
                 } catch (InterruptedException ie) {
-                    Logger.i(TAG, "Polling thread interrupted");
-                    break;
+                    if (!isRunning) {
+                        Logger.i(TAG, "Polling thread stopped via interrupt");
+                        break;
+                    } else {
+                        Logger.i(TAG, "Polling thread woken early (network restoration trigger)");
+                    }
                 } catch (Exception e) {
                     Logger.e(TAG, "Unexpected error in poll loop: " + e.getMessage(), e);
                     try { Thread.sleep(3000); } catch (Exception ignored) {}
@@ -267,8 +329,19 @@ public class SmsGatewayService extends Service {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        Logger.w(TAG, "onTaskRemoved triggered: Task swiped or killed! Scheduling instant resurrection...");
+        SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
+        if (prefs.getBoolean("service_enabled", true)) {
+            BootReceiver.scheduleImmediateRestart(this, 1000);
+        }
+    }
+
+    @Override
     public void onDestroy() {
         Logger.w(TAG, "SmsGatewayService.onDestroy invoked! Cleaning up resources...");
+        isServiceAlive = false;
         isRunning = false;
         if (pollingThread != null) {
             pollingThread.interrupt();
@@ -276,6 +349,12 @@ public class SmsGatewayService extends Service {
         try {
             unregisterReceiver(smsSentReceiver);
         } catch (Exception ignored) {}
+
+        if (connectivityManager != null && networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (Exception ignored) {}
+        }
 
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
@@ -286,6 +365,14 @@ public class SmsGatewayService extends Service {
             Logger.i(TAG, "WifiLock released");
         }
         logToUi("🛑 SMS Gateway Service stopped.");
+
+        // If service was destroyed while still enabled (e.g. LMK, OEM cleaner), resurrect!
+        SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
+        if (prefs.getBoolean("service_enabled", true)) {
+            Logger.w(TAG, "Service was destroyed unexpectedly while enabled! Scheduling resurrection in 2s...");
+            BootReceiver.scheduleImmediateRestart(this, 2000);
+        }
+
         super.onDestroy();
     }
 
