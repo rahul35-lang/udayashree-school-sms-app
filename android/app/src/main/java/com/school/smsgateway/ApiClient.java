@@ -271,6 +271,90 @@ public class ApiClient {
         }
     }
 
+    public interface TunnelStreamListener {
+        void onConnected();
+        void onJobReceived(SmsJob job);
+        void onDisconnected(String reason);
+    }
+
+    public static void listenToTunnelStream(
+            String serverUrl,
+            String token,
+            String deviceId,
+            int batteryLevel,
+            TunnelStreamListener listener,
+            java.util.concurrent.atomic.AtomicBoolean runningFlag
+    ) {
+        String cleanUrl = normalizeUrl(serverUrl) + "/api/v1/gateway/stream?device_id=" +
+                deviceId + "&battery=" + batteryLevel;
+
+        Logger.i(TAG, "Opening real-time tunnel stream listener -> " + cleanUrl);
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(cleanUrl);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("X-Gateway-Token", token);
+            conn.setRequestProperty("Accept", "text/event-stream");
+            conn.setRequestProperty("Cache-Control", "no-cache");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(45000); // 45s read timeout (server sends keepalive every 25s)
+
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                String err = readStream(conn.getErrorStream());
+                Logger.w(TAG, "Stream rejected HTTP " + code + " -> " + err);
+                listener.onDisconnected("HTTP " + code + ": " + err);
+                return;
+            }
+
+            Logger.i(TAG, "✓ Tunnel stream connected successfully! Listening for real-time events...");
+            listener.onConnected();
+
+            InputStream is = conn.getInputStream();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+            String line;
+
+            while (runningFlag.get() && (line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith(":")) {
+                    // Blank line or keepalive ping (:keepalive)
+                    continue;
+                }
+                if (line.startsWith("data:")) {
+                    String jsonStr = line.substring(5).trim();
+                    try {
+                        JSONObject obj = new JSONObject(jsonStr);
+                        String event = obj.optString("event");
+                        if ("SEND_SMS".equals(event) && obj.has("job")) {
+                            JSONObject jobObj = obj.getJSONObject("job");
+                            SmsJob job = new SmsJob(
+                                    jobObj.getInt("id"),
+                                    jobObj.getString("phone"),
+                                    jobObj.getString("message"),
+                                    jobObj.optInt("sim_slot", 0)
+                            );
+                            Logger.i(TAG, "⚡ Real-time Job #" + job.id + " received over tunnel stream!");
+                            listener.onJobReceived(job);
+                        } else if ("CONNECTED".equals(event)) {
+                            Logger.i(TAG, "Stream handshake confirmed by server: " + obj.optString("message"));
+                        }
+                    } catch (Exception parseEx) {
+                        Logger.w(TAG, "Failed parsing stream event line: " + line);
+                    }
+                }
+            }
+            listener.onDisconnected("Stream ended by server");
+        } catch (Exception e) {
+            Logger.w(TAG, "Tunnel stream interrupted: " + e.getMessage());
+            listener.onDisconnected(e.getMessage());
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
     private static String readStream(InputStream is) {
         if (is == null) return "";
         StringBuilder sb = new StringBuilder();

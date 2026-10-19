@@ -235,6 +235,42 @@ class TestServerEndpoints(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 401)
 
+    def test_stream_endpoint_realtime_push(self):
+        """Verifies that /api/v1/gateway/stream receives real-time pushed jobs with zero polling."""
+        req = urllib.request.Request(
+            f"{self.base_url}/api/v1/gateway/stream",
+            headers={"X-Gateway-Token": config.GATEWAY_SECRET_TOKEN}
+        )
+        stream_resp = urllib.request.urlopen(req, timeout=5)
+        # Read the initial CONNECTED event
+        line1 = stream_resp.readline().decode("utf-8")
+        self.assertTrue("CONNECTED" in line1, f"Expected CONNECTED event, got: {line1}")
+
+        # In a background thread, send an SMS
+        phone = "9849999999"
+        msg = "Real-time streaming push test"
+        threading.Thread(target=lambda: self._post("/api/v1/sms/send", {
+            "phone": phone,
+            "message": msg,
+            "token": config.GATEWAY_SECRET_TOKEN
+        })).start()
+
+        # Read the stream for the pushed job
+        deadline = time.time() + 4
+        found_job = False
+        while time.time() < deadline:
+            line = stream_resp.readline().decode("utf-8").strip()
+            if line.startswith("data:"):
+                data = json.loads(line[5:])
+                if data.get("event") == "SEND_SMS":
+                    job = data.get("job", {})
+                    if job.get("phone") == phone and job.get("message") == msg:
+                        found_job = True
+                        break
+
+        stream_resp.close()
+        self.assertTrue(found_job, "Expected SEND_SMS job to be pushed over stream")
+
 if __name__ == "__main__":
     unittest.main()
 

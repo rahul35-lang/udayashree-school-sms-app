@@ -61,8 +61,10 @@ public class SmsGatewayService extends Service {
     private WifiManager.WifiLock wifiLock;
     private Thread pollingThread;
     private volatile boolean isRunning = false;
+    private final java.util.concurrent.atomic.AtomicBoolean runningFlag = new java.util.concurrent.atomic.AtomicBoolean(false);
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private DeviceHttpServer deviceHttpServer;
 
     private int totalSent = 0;
     private int totalFailed = 0;
@@ -154,6 +156,20 @@ public class SmsGatewayService extends Service {
                 Logger.w(TAG, "Failed registering NetworkCallback: " + e.getMessage());
             }
         }
+
+        // Start Embedded Device HTTP Server on local port 8088
+        try {
+            deviceHttpServer = new DeviceHttpServer(this, DeviceHttpServer.DEFAULT_PORT);
+            deviceHttpServer.setDispatchListener((jobId, phone, message, simSlot) -> {
+                String logMsg = "⚡ Direct async call (Job #" + jobId + ") to " + phone;
+                Logger.i(TAG, logMsg);
+                logToUi(logMsg);
+            });
+            deviceHttpServer.start();
+            logToUi("🌐 Embedded Server listening on port " + DeviceHttpServer.DEFAULT_PORT);
+        } catch (Exception e) {
+            Logger.e(TAG, "Could not start embedded DeviceHttpServer: " + e.getMessage(), e);
+        }
     }
 
     @Override
@@ -176,18 +192,20 @@ public class SmsGatewayService extends Service {
 
         if (!isRunning) {
             isRunning = true;
-            Logger.i(TAG, "Starting Gateway polling worker thread...");
+            runningFlag.set(true);
+            Logger.i(TAG, "Starting Gateway asynchronous listener worker thread...");
             logToUi("🚀 SMS Gateway Service active in foreground.");
-            startPollingLoop();
+            startAsynchronousListenerLoop();
         }
         return START_STICKY;
     }
 
-    private void startPollingLoop() {
+    private void startAsynchronousListenerLoop() {
         pollingThread = new Thread(() -> {
-            int heartbeatCounter = 0;
+            Logger.i(TAG, "Starting Asynchronous Tunnel Stream Listener...");
+            logToUi("🎧 Listening for instant SMS dispatch on Cloudflare Tunnel & port " + DeviceHttpServer.DEFAULT_PORT);
 
-            while (isRunning) {
+            while (runningFlag.get()) {
                 try {
                     SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
                     String serverUrl = prefs.getString("server_url", DEFAULT_URL);
@@ -198,57 +216,84 @@ public class SmsGatewayService extends Service {
                         prefs.edit().putString("api_key", DEFAULT_TOKEN).apply();
                         Logger.i(TAG, "Migrated SmsGatewayService stored token to production key: " + DEFAULT_TOKEN);
                     }
-                    int intervalSec = prefs.getInt("interval_sec", 3);
 
+                    int preferredSim = prefs.getInt("preferred_sim_slot", 1);
                     int batteryLevel = getBatteryLevel();
-                    boolean isCharging = isCharging();
                     String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
                     if (deviceId == null || deviceId.isEmpty()) {
                         deviceId = "android_" + Build.MODEL;
                     }
 
+                    // 1. Initial quick sweep for any PENDING jobs queued before connection
                     try {
-                        List<ApiClient.SmsJob> jobs = ApiClient.pollPendingJobs(serverUrl, token, deviceId, batteryLevel);
-                        broadcastStatus(System.currentTimeMillis());
-
-                        if (jobs != null && !jobs.isEmpty()) {
-                            Logger.i(TAG, "Received " + jobs.size() + " job(s) from server queue");
-                            logToUi("📥 Received " + jobs.size() + " SMS job(s) from server.");
-                            int preferredSim = prefs.getInt("preferred_sim_slot", 1); // 1 = SIM 2 (default)
-                            for (ApiClient.SmsJob job : jobs) {
+                        List<ApiClient.SmsJob> pending = ApiClient.pollPendingJobs(serverUrl, token, deviceId, batteryLevel);
+                        if (pending != null && !pending.isEmpty()) {
+                            Logger.i(TAG, "Sweep claimed " + pending.size() + " pending job(s)");
+                            logToUi("📥 Sweep received " + pending.size() + " SMS job(s).");
+                            for (ApiClient.SmsJob job : pending) {
                                 int targetSlot = (job.simSlot > 0) ? (job.simSlot - 1) : preferredSim;
                                 logToUi("⏳ Cellular dispatching via SIM " + (targetSlot + 1) + " to: " + job.phone);
                                 SmsSender.sendSms(this, job.id, job.phone, job.message, targetSlot);
                                 Thread.sleep(700);
                             }
-                        } else {
-                            heartbeatCounter++;
-                            if (heartbeatCounter >= 10) {
-                                heartbeatCounter = 0;
-                                boolean hb = ApiClient.sendHeartbeat(serverUrl, token, deviceId, batteryLevel, isCharging);
-                                if (hb) {
-                                    Logger.i(TAG, "Heartbeat healthy -> server acknowledged device alive");
-                                }
-                            }
                         }
                     } catch (Exception e) {
-                        Logger.w(TAG, "Polling exception: " + e.getMessage());
+                        Logger.w(TAG, "Pre-stream sweep warning: " + e.getMessage());
                     }
 
-                    Thread.sleep(Math.max(1000, intervalSec * 1000));
+                    broadcastStatus(System.currentTimeMillis());
+
+                    // 2. Open persistent real-time streaming listener on Cloudflare Tunnel
+                    ApiClient.listenToTunnelStream(
+                            serverUrl,
+                            token,
+                            deviceId,
+                            batteryLevel,
+                            new ApiClient.TunnelStreamListener() {
+                                @Override
+                                public void onConnected() {
+                                    logToUi("🟢 Tunnel Stream ACTIVE - Listening for real-time OTPs");
+                                    broadcastStatus(System.currentTimeMillis());
+                                }
+
+                                @Override
+                                public void onJobReceived(ApiClient.SmsJob job) {
+                                    logToUi("⚡ Real-time OTP received via tunnel (Job #" + job.id + ") -> " + job.phone);
+                                    int targetSlot = (job.simSlot > 0) ? (job.simSlot - 1) : preferredSim;
+                                    try {
+                                        SmsSender.sendSms(SmsGatewayService.this, job.id, job.phone, job.message, targetSlot);
+                                    } catch (Exception e) {
+                                        Logger.e(TAG, "Cellular modem dispatch failure: " + e.getMessage(), e);
+                                        logToUi("✗ Cellular dispatch error: " + e.getMessage());
+                                    }
+                                    broadcastStatus(System.currentTimeMillis());
+                                }
+
+                                @Override
+                                public void onDisconnected(String reason) {
+                                    logToUi("🟡 Tunnel stream disconnected (" + reason + "). Reconnecting...");
+                                }
+                            },
+                            runningFlag
+                    );
+
+                    // Reconnection backoff
+                    if (runningFlag.get()) {
+                        Thread.sleep(3000);
+                    }
                 } catch (InterruptedException ie) {
-                    if (!isRunning) {
-                        Logger.i(TAG, "Polling thread stopped via interrupt");
+                    if (!runningFlag.get()) {
+                        Logger.i(TAG, "Listener thread stopped via interrupt");
                         break;
                     } else {
-                        Logger.i(TAG, "Polling thread woken early (network restoration trigger)");
+                        Logger.i(TAG, "Listener thread woken early (network restoration trigger)");
                     }
                 } catch (Exception e) {
-                    Logger.e(TAG, "Unexpected error in poll loop: " + e.getMessage(), e);
+                    Logger.e(TAG, "Unexpected error in listener loop: " + e.getMessage(), e);
                     try { Thread.sleep(3000); } catch (Exception ignored) {}
                 }
             }
-        }, "GatewayPollWorker");
+        }, "TunnelListenerWorker");
         pollingThread.start();
     }
 
@@ -343,6 +388,15 @@ public class SmsGatewayService extends Service {
         Logger.w(TAG, "SmsGatewayService.onDestroy invoked! Cleaning up resources...");
         isServiceAlive = false;
         isRunning = false;
+        runningFlag.set(false);
+
+        if (deviceHttpServer != null) {
+            try {
+                deviceHttpServer.stop();
+            } catch (Exception ignored) {}
+            deviceHttpServer = null;
+        }
+
         if (pollingThread != null) {
             pollingThread.interrupt();
         }

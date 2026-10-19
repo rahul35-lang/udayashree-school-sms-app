@@ -221,7 +221,7 @@ public class MainActivity extends Activity {
     private void updateServiceStatusUi() {
         boolean isRunning = prefs.getBoolean("service_enabled", false);
         if (isRunning) {
-            tvStatusBadge.setText("ACTIVE");
+            tvStatusBadge.setText("LISTENING (PORT 8088 & TUNNEL)");
             tvStatusBadge.setBackgroundResource(R.drawable.btn_primary);
             btnToggleService.setText("STOP SERVICE");
             btnToggleService.setBackgroundResource(R.drawable.btn_danger);

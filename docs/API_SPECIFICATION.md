@@ -197,3 +197,64 @@ For general attendance, exam, or emergency notices.
   }
 }
 ```
+
+---
+
+## 8. Real-Time Tunnel Stream (Asynchronous Gateway Listener)
+Long-lived HTTP Event Stream over Cloudflare Tunnel (`sms.success0.com.np`). The Android Gateway maintains this persistent connection to receive dispatched SMS jobs instantly with zero polling.
+
+- **URL:** `GET /api/v1/gateway/stream?device_id=32e9a51e732eeab4&battery=60`
+- **Headers:** `X-Gateway-Token: Udaya@momphone`
+- **Stream Frames (text/event-stream):**
+  - **Connection Handshake:**
+    ```
+    data: {"event": "CONNECTED", "device_id": "32e9a51e732eeab4", "server_time": 1792391644, "message": "Connected to School SMS Gateway real-time tunnel stream"}
+    ```
+  - **Instant Push SMS Dispatch:**
+    ```
+    data: {"event": "SEND_SMS", "job": {"id": 107, "phone": "9841234567", "message": "Your School App verification code is: 123456.", "sim_slot": 0}}
+    ```
+  - **Keepalive Ping (Every 25s):**
+    ```
+    :keepalive
+    ```
+
+---
+
+## 9. Device Embedded HTTP Server (Port 8088)
+The Android device runs an ultra-lightweight direct HTTP server on port 8088.
+
+### Ping & Local Liveness Check
+- **URL:** `GET http://<device-ip>:8088/api/v1/ping`
+- **Response (200 OK):**
+```json
+{
+  "status": "ONLINE",
+  "device_model": "vivo V2333",
+  "server": "SchoolSMSGateway Embedded Server",
+  "port": 8088
+}
+```
+
+### Direct Asynchronous SMS Dispatch
+- **URL:** `POST http://<device-ip>:8088/api/v1/sms/dispatch`
+- **Headers:**
+  - `Content-Type: application/json`
+  - `X-Gateway-Token: Udaya@momphone`
+- **Request Body:**
+```json
+{
+  "job_id": 108,
+  "phone": "9841234567",
+  "message": "Emergency notice: School closes early today due to rain.",
+  "sim_slot": 0
+}
+```
+- **Response (200 OK):**
+```json
+{
+  "success": true,
+  "job_id": 108,
+  "status": "DISPATCHED"
+}
+```

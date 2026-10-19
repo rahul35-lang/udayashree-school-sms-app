@@ -118,6 +118,45 @@ def fetch_and_claim_pending_jobs(
     conn.close()
     return jobs
 
+def claim_job_by_id(
+    job_id: int,
+    db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Atomically transitions a single SMS job from 'PENDING' to 'DISPATCHING'.
+    Used for immediate real-time push over the tunnel stream or direct device call.
+    Returns the job details if claimed, or None if already claimed or non-existent.
+    """
+    now = int(time.time())
+    conn = database.get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, phone, message, sim_slot
+        FROM sms_queue
+        WHERE id = ? AND status = 'PENDING';
+    """, (job_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return None
+
+    cursor.execute("""
+        UPDATE sms_queue
+        SET status = 'DISPATCHING', updated_at = ?
+        WHERE id = ?;
+    """, (now, job_id))
+
+    conn.commit()
+    conn.close()
+    return {
+        "id": row["id"],
+        "phone": row["phone"],
+        "message": row["message"],
+        "sim_slot": row["sim_slot"]
+    }
+
 def report_dispatch_result(
     job_id: int,
     status: str,

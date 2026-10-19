@@ -31,6 +31,7 @@ LAST MODIFIED: 2026-10-16
 
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -318,6 +319,96 @@ HTML_UI = """<!DOCTYPE html>
 </html>
 """
 
+# =============================================================================
+# ASYNCHRONOUS REAL-TIME TUNNEL LISTENER REGISTRY
+# =============================================================================
+
+class TunnelListenerManager:
+    """
+    Coordinates persistent asynchronous streaming listener connections from Android devices.
+    Whenever an OTP or SMS job is queued, immediately pushes to all listening devices
+    over the Cloudflare Tunnel with zero polling latency.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._listeners = set()
+
+    def register(self, q: queue.Queue):
+        with self._lock:
+            self._listeners.add(q)
+
+    def unregister(self, q: queue.Queue):
+        with self._lock:
+            self._listeners.discard(q)
+
+    def broadcast_job(self, job_data: dict) -> int:
+        with self._lock:
+            active = len(self._listeners)
+            for q in list(self._listeners):
+                try:
+                    q.put_nowait(job_data)
+                except Exception:
+                    pass
+            return active
+
+    @property
+    def listener_count(self) -> int:
+        with self._lock:
+            return len(self._listeners)
+
+listener_manager = TunnelListenerManager()
+
+def dispatch_job_to_device_async(job_id: int, phone: str, message: str, sim_slot: int = 0):
+    """
+    Asynchronously delivers newly generated SMS/OTP to listening phone devices:
+    1. If a phone is listening on the active tunnel stream, pushes directly via SSE.
+    2. If DEVICE_TUNNEL_URL is configured, calls POST <url>/api/v1/sms/dispatch.
+    """
+    def _worker():
+        # Priority 1: Direct real-time push to connected tunnel stream listeners
+        if listener_manager.listener_count > 0:
+            claimed = sms_queue.claim_job_by_id(job_id)
+            if claimed:
+                pushed = listener_manager.broadcast_job(claimed)
+                print(f"[STREAM PUSH] Dispatched Job #{job_id} to {pushed} listening device(s)")
+                return
+
+        # Priority 2: Direct device tunnel / port endpoint call
+        device_url = config.DEVICE_TUNNEL_URL
+        if device_url:
+            claimed = sms_queue.claim_job_by_id(job_id)
+            if claimed:
+                try:
+                    import urllib.request
+                    target = device_url.rstrip("/") + "/api/v1/sms/dispatch"
+                    payload = json.dumps({
+                        "job_id": job_id,
+                        "phone": phone,
+                        "message": message,
+                        "sim_slot": sim_slot
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        target,
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json; charset=utf-8",
+                            "X-Gateway-Token": config.GATEWAY_SECRET_TOKEN
+                        },
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        print(f"[TUNNEL CALL] Dispatched Job #{job_id} to {target} -> HTTP {resp.status}")
+                except Exception as e:
+                    print(f"[TUNNEL CALL ERROR] Failed calling {device_url}: {e}")
+                    # Revert to PENDING so poller or stream reconnect can claim it
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE sms_queue SET status='PENDING' WHERE id=? AND status='DISPATCHING'", (job_id,))
+                    conn.commit()
+                    conn.close()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 class ModularGatewayHandler(BaseHTTPRequestHandler):
     """
     HTTP Request Handler routing all API endpoints and static assets.
@@ -370,6 +461,11 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
         # System Metrics & Health Endpoint
         if path in ("/api/v1/status", "/api/status"):
             self._handle_status()
+            return
+
+        # Gateway Asynchronous Tunnel Stream Listener Endpoint (Authorized)
+        if path in ("/api/v1/gateway/stream", "/api/gateway/stream", "/api/v1/gateway/listen"):
+            self._handle_gateway_stream(query)
             return
 
         # Gateway Job Polling Endpoint (Authorized)
@@ -457,7 +553,7 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
 
         if dev:
             last_seen = now - dev["last_heartbeat_at"]
-            gateway_online = (last_seen <= config.HEARTBEAT_TIMEOUT_SECONDS)
+            gateway_online = (last_seen <= config.HEARTBEAT_TIMEOUT_SECONDS) or (listener_manager.listener_count > 0)
             battery = dev["battery_level"]
             model = dev["device_model"]
 
@@ -465,11 +561,93 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             "status": "ONLINE",
             "server_time": now,
             "gateway_online": gateway_online,
+            "tunnel_listeners": listener_manager.listener_count,
             "device_model": model,
             "last_seen_seconds": last_seen,
             "battery": battery,
             "metrics": metrics
         })
+
+    def _handle_gateway_stream(self, query):
+        """
+        Persistent asynchronous HTTP event stream over Cloudflare Tunnel.
+        The Android device listens on this channel to receive SMS jobs in real-time
+        with zero polling overhead.
+        """
+        if not auth.verify_request_auth(dict(self.headers), query):
+            self._send_json({"success": False, "error": "Unauthorized token"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+
+        device_id = query.get("device_id", ["default"])[0]
+        battery = query.get("battery", [None])[0]
+        now = int(time.time())
+
+        # Update gateway liveness in database
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO gateway_devices (device_id, device_model, battery_level, last_handshake_at, last_heartbeat_at)
+            VALUES (?, 'Android Gateway', ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                last_heartbeat_at = excluded.last_heartbeat_at,
+                battery_level = COALESCE(excluded.battery_level, gateway_devices.battery_level);
+        """, (device_id, int(battery) if battery else None, now, now))
+        conn.commit()
+        conn.close()
+
+        # Send SSE streaming response headers
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        # Flush initial connection frame
+        greeting = {
+            "event": "CONNECTED",
+            "device_id": device_id,
+            "server_time": now,
+            "message": "Connected to School SMS Gateway real-time tunnel stream"
+        }
+        try:
+            self.wfile.write(f"data: {json.dumps(greeting)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except Exception:
+            return
+
+        q = queue.Queue()
+        listener_manager.register(q)
+
+        try:
+            # Check if any PENDING jobs are in the queue and push them immediately
+            pending_jobs = sms_queue.fetch_and_claim_pending_jobs(limit=config.BATCH_POLL_LIMIT)
+            for job in pending_jobs:
+                payload = {"event": "SEND_SMS", "job": job}
+                self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+            while True:
+                try:
+                    job = q.get(timeout=25)
+                    payload = {"event": "SEND_SMS", "job": job}
+                    self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    # Cloudflare & HTTP keepalive comment
+                    self.wfile.write(b":keepalive\n\n")
+                    self.wfile.flush()
+                    # Refresh heartbeat in DB
+                    now_ts = int(time.time())
+                    c = database.get_connection()
+                    c.execute("UPDATE gateway_devices SET last_heartbeat_at=? WHERE device_id=?", (now_ts, device_id))
+                    c.commit()
+                    c.close()
+        except (BrokenPipeError, ConnectionResetError, ConnectionError, OSError):
+            pass
+        finally:
+            listener_manager.unregister(q)
 
     def _handle_gateway_handshake(self, body):
         """Processes mutual handshake with Android device."""
@@ -603,6 +781,11 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             override_code=str(override_code).strip() if override_code is not None else None
         )
 
+        if success and "job_id" in details:
+            job = sms_queue.get_job_status(details["job_id"])
+            if job:
+                dispatch_job_to_device_async(job["id"], job["phone"], job["message"], job.get("sim_slot", 0))
+
         status_code = HTTPStatus.OK if success else (HTTPStatus.TOO_MANY_REQUESTS if "Rate limit" in msg else HTTPStatus.BAD_REQUEST)
         self._send_json({
             "success": success,
@@ -642,6 +825,7 @@ class ModularGatewayHandler(BaseHTTPRequestHandler):
             return
 
         job_id = sms_queue.enqueue_sms(phone, message)
+        dispatch_job_to_device_async(job_id, phone, message, 0)
         self._send_json({
             "success": True,
             "job_id": job_id,

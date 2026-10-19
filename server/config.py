@@ -37,6 +37,10 @@ PRIMARY_PORT = int(os.environ.get("GATEWAY_PORT", 8080))
 # receive requests concurrently for backward compatibility with local scripts.
 SECONDARY_PORT = int(os.environ.get("GATEWAY_PORT_SECONDARY", 8000))
 
+# DEVICE_TUNNEL_URL: Optional direct tunnel or endpoint URL pointing to the Android
+# device's embedded server port (e.g. http://192.168.1.x:8088 or custom Cloudflare tunnel).
+DEVICE_TUNNEL_URL = os.environ.get("DEVICE_TUNNEL_URL", "").rstrip("/")
+
 # =============================================================================
 # AUTHENTICATION & HANDSHAKE CONSTANTS
 # =============================================================================

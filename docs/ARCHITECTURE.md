@@ -64,3 +64,40 @@
                                               │
                                               └──(Radio Error)───> [ FAILED ]
 ```
+
+---
+
+## 4. Dual-Mode Asynchronous Event-Driven Architecture
+
+To achieve zero polling latency and maximum battery/network efficiency, the system operates in an asynchronous listening model:
+
+```
+[ School App ] ---> (POST /api/v1/otp/send) ---> [ Gateway Server ]
+                                                        |
+                    +-----------------------------------+-----------------------------------+
+                    |                                                                       |
+                    v                                                                       v
+         [ Mode 1: Cloudflare Tunnel ]                                          [ Mode 2: Direct Device Call ]
+      Persistent HTTP Stream (/stream)                                        Embedded HTTP Server (Port 8088)
+                    |                                                                       |
+                    v (<20ms Push)                                                          v (<10ms Direct)
+        [ Android Gateway Phone ]                                               [ Android Gateway Phone ]
+            (SmsGatewayService)                                                     (DeviceHttpServer)
+                    |                                                                       |
+                    +-----------------------------------+-----------------------------------+
+                                                        |
+                                                        v
+                                           [ Send SMS via SIM 2 Radio ]
+```
+
+1. **Mode 1 - Persistent Tunnel Event Stream (`/api/v1/gateway/stream`):**
+   - The Android device initiates a long-lived outbound HTTP Event Stream connection through Cloudflare Tunnel (`https://sms.success0.com.np/api/v1/gateway/stream`).
+   - Server registers the listening device in `TunnelListenerManager`.
+   - When an OTP or SMS is enqueued, the server immediately pushes `{"event": "SEND_SMS", "job": {...}}` down the tunnel socket in `<20ms`.
+   - Eliminates 28,800 polling requests per day. Idle traffic is reduced to a single `:keepalive` comment every 25 seconds.
+   - Reconnect handler sweeps any pending jobs to guarantee zero dropped messages.
+
+2. **Mode 2 - Embedded Device HTTP Server (Port `8088`):**
+   - The Android background service runs an ultra-lightweight embedded HTTP server (`DeviceHttpServer`) on `0.0.0.0:8088` with zero external dependencies.
+   - Exposes `POST /api/v1/sms/dispatch` authenticated via `X-Gateway-Token` for direct local network, reverse tunnel, or ADB-forwarded dispatch.
+   - Exposes `GET /api/v1/ping` for direct liveness health checks.

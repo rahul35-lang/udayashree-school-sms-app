@@ -5,7 +5,7 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#)
 [![Security: Zero--Trust](https://img.shields.io/badge/Security-Zero--Trust%20HMAC-red.svg)](#)
 [![APK Size: 40KB](https://img.shields.io/badge/APK%20Size-40KB%20(Zero--Bloat)-orange.svg)](#)
-[![Tests: 31/31 Passing](https://img.shields.io/badge/Tests-31%2F31%20Passing-success.svg)](#)
+[![Tests: 32/32 Passing](https://img.shields.io/badge/Tests-32%2F32%20Passing-success.svg)](#)
 
 A self-hosted, 24/7 autonomous cellular SMS and Parent Verification Gateway for the School Management System. Converts an Android smartphone with an active cellular SIM card (configured on **SIM 2 / Namaste 4G LTE**) into a high-reliability hardware telecom baseband dispatcher over a secure Cloudflare Tunnel.
 
@@ -55,8 +55,8 @@ A self-hosted, 24/7 autonomous cellular SMS and Parent Verification Gateway for 
 │  (SQLite WAL Queue + Cryptographic Single-Use OTP)     │
 └───────────────────────────┬────────────────────────────┘
                             ▲
-                            │ (3) Periodic Adaptive Long-Poll (every 3s)
-                            │     with token `Udaya@momphone`
+                            │ (3) Persistent Real-Time Stream (/gateway/stream)
+                            │     OR Direct Local Push (Port 8088) [<20ms latency]
 ┌───────────────────────────┴────────────────────────────┐
 │          Android Hardware Gateway Phone                │
 │    (Vivo V2333, Android 16, 24/7 Foreground Service)   │
